@@ -237,14 +237,22 @@ def get_fyers_token(force_refresh: bool = False) -> tuple[bool, str]:
 
     return login_and_generate_token()
 
+_cached_fyers_client = None
+_cached_fyers_token = None
+
 def get_fyers_client(force_refresh: bool = False) -> tuple[bool, fyersModel.FyersModel | str]:
     """
     Returns an authenticated instance of fyersModel.FyersModel.
     Automatically refreshes token if expired.
+    Uses in-memory cache to prevent multiple concurrent re-instantiations.
     """
+    global _cached_fyers_client, _cached_fyers_token
     success, token_or_err = get_fyers_token(force_refresh=force_refresh)
     if not success:
         return False, token_or_err
+
+    if not force_refresh and _cached_fyers_client is not None and _cached_fyers_token == token_or_err:
+        return True, _cached_fyers_client
 
     try:
         fyers = fyersModel.FyersModel(
@@ -252,6 +260,8 @@ def get_fyers_client(force_refresh: bool = False) -> tuple[bool, fyersModel.Fyer
             token=token_or_err,
             is_async=False
         )
+        _cached_fyers_client = fyers
+        _cached_fyers_token = token_or_err
         return True, fyers
     except Exception as e:
         return False, f"Failed to instantiate FyersModel: {str(e)}"

@@ -654,8 +654,25 @@ div[class*="st-key-btn_kpi_"] > button em {
 
 # Note: format_volume and calculate_trade_levels are imported from core.indicators
 
-@st.cache_data(ttl=120)
+@st.cache_data(ttl=60)
 def get_nifty_sentiment():
+    # 1. Try Fyers API first (Real-time official NSE quote)
+    try:
+        from core.fyers_auth import get_fyers_client
+        ok, fyers = get_fyers_client()
+        if ok and fyers:
+            res = fyers.quotes(data={"symbols": "NSE:NIFTY50-INDEX"})
+            if res.get("s") == "ok" and "d" in res and len(res["d"]) > 0:
+                v = res["d"][0].get("v", {})
+                lp = float(v.get("lp", 0))
+                ch = float(v.get("ch", 0))
+                chp = float(v.get("chp", 0))
+                if lp > 0:
+                    return {"price": lp, "change": ch, "pct": chp, "is_bullish": ch >= 0}
+    except Exception:
+        pass
+
+    # 2. Fallback to yfinance
     try:
         t = yf.Ticker("^NSEI")
         d = t.history(period="5d", interval="1d")
@@ -719,38 +736,74 @@ BASKETS = {
 
 def scan_heikin_ashi_stock(sym, min_red_candles=5, timeframe="Daily"):
     try:
-        clean_sym = sym.strip().upper()
-        if not clean_sym.endswith(".NS") and not clean_sym.endswith(".BO") and not clean_sym.startswith("^"):
-            ticker_sym = f"{clean_sym}.NS"
-        else:
-            ticker_sym = clean_sym
-            
-        ticker = yf.Ticker(ticker_sym)
+        clean_sym = sym.replace(".NS", "").replace(".BO", "").replace("^", "").strip().upper()
+        ticker_sym = f"{clean_sym}.NS"
         
-        if timeframe == "2-Hour":
-            df = ticker.history(period="1mo", interval="1h").dropna(subset=['Open', 'High', 'Low', 'Close', 'Volume'])
-            donchian_p = 6 # ~3 2-hour bars
-        elif timeframe == "Weekly":
-            df = ticker.history(period="3y", interval="1wk").dropna(subset=['Open', 'High', 'Low', 'Close', 'Volume'])
-            donchian_p = 5 # 5 weekly bars
-        else: # Daily
-            df = ticker.history(period="1y", interval="1d").dropna(subset=['Open', 'High', 'Low', 'Close', 'Volume'])
-            donchian_p = 11 # 11 daily bars
+        df = None
+        # 1. Try Fyers API first
+        try:
+            from core.fyers_auth import get_fyers_client
+            from datetime import datetime as _dt, timedelta as _td
+            ok_f, fyers_c = get_fyers_client()
+            if ok_f and fyers_c:
+                f_sym = f"NSE:{clean_sym}-EQ"
+                res_code = "120" if timeframe == "2-Hour" else ("W" if timeframe == "Weekly" else "D")
+                days_back = 45 if timeframe == "2-Hour" else (365 if timeframe == "Weekly" else 180)
+                now_dt = _dt.now()
+                to_d = now_dt.strftime("%Y-%m-%d")
+                from_d = (now_dt - _td(days=days_back)).strftime("%Y-%m-%d")
+                d_req = {
+                    "symbol": f_sym,
+                    "resolution": res_code,
+                    "date_format": "1",
+                    "range_from": from_d,
+                    "range_to": to_d,
+                    "cont_flag": "1"
+                }
+                res = fyers_c.history(data=d_req)
+                candles = res.get("candles", [])
+                if candles and len(candles) >= 25:
+                    df = pd.DataFrame(candles, columns=['Timestamp', 'Open', 'High', 'Low', 'Close', 'Volume'])
+                    df['Date'] = pd.to_datetime(df['Timestamp'], unit='s')
+                    df.set_index('Date', inplace=True)
+        except Exception:
+            pass
+
+        # 2. Fallback to yfinance
+        if df is None or len(df) < 25:
+            ticker_sym = f"{clean_sym}.NS"
+            ticker = yf.Ticker(ticker_sym)
+            if timeframe == "2-Hour":
+                df = ticker.history(period="1mo", interval="1h").dropna(subset=['Open', 'High', 'Low', 'Close', 'Volume'])
+                donchian_p = 6
+            elif timeframe == "Weekly":
+                df = ticker.history(period="3y", interval="1wk").dropna(subset=['Open', 'High', 'Low', 'Close', 'Volume'])
+                donchian_p = 5
+            else:
+                df = ticker.history(period="1y", interval="1d").dropna(subset=['Open', 'High', 'Low', 'Close', 'Volume'])
+                donchian_p = 11
+        else:
+            donchian_p = 6 if timeframe == "2-Hour" else (5 if timeframe == "Weekly" else 11)
             
-        if len(df) < 25:
+        if df is None or len(df) < 25:
             return None
             
         df = calculate_volume_analysis(df)
         ha_df = calculate_heikin_ashi(df)
         ha_df = calculate_donchian_channel(ha_df, period=donchian_p)
         
-        # Weekly macro trend check
+        # Weekly macro trend check (Resample in-memory with 0 network calls!)
         weekly_bullish = True
         if timeframe == "Daily":
-            df_w = ticker.history(period="2y", interval="1wk").dropna(subset=['Open', 'High', 'Low', 'Close', 'Volume'])
-            if len(df_w) >= 10:
-                ha_w = calculate_heikin_ashi(df_w)
-                weekly_bullish = bool((ha_w['HA_Close'].iloc[-1] >= ha_w['HA_Open'].iloc[-1]) or (df_w['Close'].iloc[-1] >= df_w['Close'].tail(15).mean()))
+            try:
+                df_w = df.resample('W-FRI').agg({
+                    'Open': 'first', 'High': 'max', 'Low': 'min', 'Close': 'last', 'Volume': 'sum'
+                }).dropna()
+                if len(df_w) >= 10:
+                    ha_w = calculate_heikin_ashi(df_w)
+                    weekly_bullish = bool((ha_w['HA_Close'].iloc[-1] >= ha_w['HA_Open'].iloc[-1]) or (df_w['Close'].iloc[-1] >= df_w['Close'].tail(15).mean()))
+            except Exception:
+                weekly_bullish = True
                 
         curr = ha_df.iloc[-1]
         prev = ha_df.iloc[-2]
@@ -836,22 +889,99 @@ def scan_heikin_ashi_stock(sym, min_red_candles=5, timeframe="Daily"):
 # Note: plot_heikin_ashi_donchian_chart is imported directly from core.charts
 
 # -------------------------------------------------------------
-# Function: Scan a Single Stock for Screener
+# Function: Fast Multi-Timeframe Candle Loader & Screener Scanner
 # -------------------------------------------------------------
-def scan_stock(sym):
+def fetch_scanner_data(clean_sym):
+    """
+    High-speed multi-timeframe candle fetcher using Fyers API first,
+    with in-memory Weekly/Monthly resampling, falling back to yfinance with timeout.
+    """
+    import time as _time
+    now_ts = int(_time.time())
+
+    # 1. Try Fyers API first (0.3s per stock, official NSE data, zero rate-limits)
     try:
-        clean_sym = sym.strip().upper()
-        if not clean_sym.endswith(".NS") and not clean_sym.endswith(".BO") and not clean_sym.startswith("^"):
-            ticker_sym = f"{clean_sym}.NS"
-        else:
-            ticker_sym = clean_sym
-            
+        from core.fyers_auth import get_fyers_client
+        from datetime import datetime as _dt, timedelta as _td
+        ok_fyers, fyers_client = get_fyers_client()
+        if ok_fyers and fyers_client:
+            f_sym = f"NSE:{clean_sym}-EQ"
+            now_dt = _dt.now()
+            to_d = now_dt.strftime("%Y-%m-%d")
+            from_d = (now_dt - _td(days=365)).strftime("%Y-%m-%d")
+            from_1h = (now_dt - _td(days=45)).strftime("%Y-%m-%d")
+            d_req = {
+                "symbol": f_sym,
+                "resolution": "D",
+                "date_format": "1",
+                "range_from": from_d,
+                "range_to": to_d,
+                "cont_flag": "1"
+            }
+            res_d = fyers_client.history(data=d_req)
+            candles_d = res_d.get("candles", [])
+
+            h1_req = {
+                "symbol": f_sym,
+                "resolution": "60",
+                "date_format": "1",
+                "range_from": from_1h,
+                "range_to": to_d,
+                "cont_flag": "1"
+            }
+            res_1h = fyers_client.history(data=h1_req)
+            candles_1h = res_1h.get("candles", [])
+
+            if candles_d and len(candles_d) >= 30 and candles_1h:
+                df_d = pd.DataFrame(candles_d, columns=['Timestamp', 'Open', 'High', 'Low', 'Close', 'Volume'])
+                df_d['Date'] = pd.to_datetime(df_d['Timestamp'], unit='s')
+                df_d.set_index('Date', inplace=True)
+
+                df_1h = pd.DataFrame(candles_1h, columns=['Timestamp', 'Open', 'High', 'Low', 'Close', 'Volume'])
+                df_1h['Date'] = pd.to_datetime(df_1h['Timestamp'], unit='s')
+                df_1h.set_index('Date', inplace=True)
+
+                # Resample weekly and monthly in memory (0 network calls)
+                df_w = df_d.resample('W-FRI').agg({
+                    'Open': 'first', 'High': 'max', 'Low': 'min', 'Close': 'last', 'Volume': 'sum'
+                }).dropna()
+                df_m = df_d.resample('ME').agg({
+                    'Open': 'first', 'High': 'max', 'Low': 'min', 'Close': 'last', 'Volume': 'sum'
+                }).dropna()
+
+                return df_d, df_w, df_m, df_1h
+    except Exception:
+        pass
+
+    # 2. Fallback to yfinance with in-memory resampling
+    try:
+        ticker_sym = f"{clean_sym}.NS"
         ticker = yf.Ticker(ticker_sym)
         df_d = ticker.history(period="1y", interval="1d").dropna(subset=['Close', 'High', 'Low', 'Volume'])
-        df_w = ticker.history(period="3y", interval="1wk").dropna(subset=['Close', 'High', 'Low', 'Volume'])
-        df_m = ticker.history(period="5y", interval="1mo").dropna(subset=['Close', 'High', 'Low', 'Volume'])
         df_1h = ticker.history(period="1mo", interval="1h").dropna(subset=['Close', 'High', 'Low', 'Volume'])
         
+        if df_d.empty or len(df_d) < 30 or df_1h.empty:
+            return None
+
+        df_w = df_d.resample('W-FRI').agg({
+            'Open': 'first', 'High': 'max', 'Low': 'min', 'Close': 'last', 'Volume': 'sum'
+        }).dropna()
+        df_m = df_d.resample('ME').agg({
+            'Open': 'first', 'High': 'max', 'Low': 'min', 'Close': 'last', 'Volume': 'sum'
+        }).dropna()
+
+        return df_d, df_w, df_m, df_1h
+    except Exception:
+        return None
+
+def scan_stock(sym):
+    try:
+        clean_sym = sym.replace(".NS", "").replace(".BO", "").replace("^", "").strip().upper()
+        ticker_sym = f"{clean_sym}.NS"
+        data = fetch_scanner_data(clean_sym)
+        if not data:
+            return None
+        df_d, df_w, df_m, df_1h = data
         if df_d.empty or len(df_d) < 30 or df_1h.empty:
             return None
             
@@ -1238,9 +1368,6 @@ with nav_tab_screener:
     if start_scan or basket_changed:
         should_scan = True
         is_auto_scan = False
-    elif st.session_state.screener_results is None:
-        should_scan = True
-        is_auto_scan = False
     elif auto_update_enabled and (time_since_last_scan >= (interval_sec - 2)):
         should_scan = True
         is_auto_scan = True
@@ -1260,7 +1387,7 @@ with nav_tab_screener:
                     future_to_stock = {executor.submit(scan_stock, sym): sym for sym in tickers_to_scan}
                     for future in as_completed(future_to_stock):
                         try:
-                            res = future.result()
+                            res = future.result(timeout=10)
                             if res:
                                 results.append(res)
                         except Exception:
@@ -1274,7 +1401,7 @@ with nav_tab_screener:
                     completed += 1
                     progress_bar.progress(completed / total, text=f"સ્કેનિંગ પ્રગતિમાં છે... ({completed}/{total} શેરો પૂરા થયા)")
                     try:
-                        res = future.result()
+                        res = future.result(timeout=10)
                         if res:
                             results.append(res)
                     except Exception:
@@ -1657,9 +1784,33 @@ with nav_tab_screener:
         
         if inspect_sym:
             with st.spinner(f"{inspect_sym} માટે કેન્ડલસ્ટિક ચાર્ટ લોડ થઈ રહ્યો છે..."):
-                t = yf.Ticker(inspect_sym)
-                q_df_1h = calculate_volume_analysis(calculate_trend_craft_ict(calculate_hilega_milega(t.history(period="1mo", interval="1h").dropna(subset=['Close', 'High', 'Low', 'Volume']))))
-                q_df_d = calculate_volume_analysis(calculate_trend_craft_ict(calculate_hilega_milega(t.history(period="1y", interval="1d").dropna(subset=['Close', 'High', 'Low', 'Volume']))))
+                q_df_d = None
+                q_df_1h = None
+                try:
+                    from core.charts import fetch_fyers_chart_df
+                    q_df_d = fetch_fyers_chart_df(inspect_sym, interval="D", days=180)
+                    q_df_1h = fetch_fyers_chart_df(inspect_sym, interval="1h", days=45)
+                except Exception:
+                    pass
+
+                if q_df_d is None or q_df_d.empty:
+                    try:
+                        t = yf.Ticker(inspect_sym)
+                        q_df_d = t.history(period="1y", interval="1d").dropna(subset=['Close', 'High', 'Low', 'Volume'])
+                    except Exception:
+                        q_df_d = pd.DataFrame()
+
+                if q_df_1h is None or q_df_1h.empty:
+                    try:
+                        t = yf.Ticker(inspect_sym)
+                        q_df_1h = t.history(period="1mo", interval="1h").dropna(subset=['Close', 'High', 'Low', 'Volume'])
+                    except Exception:
+                        q_df_1h = pd.DataFrame()
+
+                if not q_df_d.empty:
+                    q_df_d = calculate_volume_analysis(calculate_trend_craft_ict(calculate_hilega_milega(q_df_d)))
+                if not q_df_1h.empty:
+                    q_df_1h = calculate_volume_analysis(calculate_trend_craft_ict(calculate_hilega_milega(q_df_1h)))
                 
                 chart_col_tv, chart_col1, chart_col2 = st.tabs([
                     "📊 GGPATEL VIEW (ઇન્ટરેક્ટિવ)",
@@ -1676,6 +1827,25 @@ with nav_tab_screener:
                     if not q_df_d.empty:
                         c_d = plot_candlestick_triple_chart(q_df_d, title_prefix=f"{inspect_sym} Daily", lookback=100, is_hourly=False)
                         st.altair_chart(c_d, width="stretch")
+    else:
+        st.markdown(
+            """
+            <div style="background: linear-gradient(135deg, rgba(30, 41, 59, 0.7) 0%, rgba(15, 23, 42, 0.9) 100%);
+                        border: 1px dashed rgba(56, 189, 248, 0.35); border-radius: 14px; padding: 36px 24px; text-align: center; margin-top: 18px;">
+                <div style="font-size: 36px; margin-bottom: 12px;">🎯 🚀</div>
+                <h3 style="color: #F8FAFC; margin-bottom: 8px; font-weight: 700;">કોન્ફ્લુઅન્સ પ્રો માર્કેટ સ્કેનર તૈયાર છે</h3>
+                <p style="color: #94A3B8; font-size: 14px; max-width: 640px; margin: 0 auto 20px auto; line-height: 1.6;">
+                    બજારના ૧૮૧+ F&O સ્ટોક્સનું <b>4-Timeframe Confluence</b> (1-Hour + Daily + Weekly + Monthly), Hilega-Milega, VPA Volume અને R3 Option Radar સાથે લાઈવ એનાલિસિસ કરવા માટે ઉપરનું <b>"🚀 Scan Market Now"</b> બટન દબાવો.
+                </p>
+                <div style="display: inline-flex; gap: 12px; flex-wrap: wrap; justify-content: center;">
+                    <span style="background: rgba(56, 189, 248, 0.15); border: 1px solid rgba(56, 189, 248, 0.3); color: #38BDF8; padding: 6px 14px; border-radius: 20px; font-size: 12.5px; font-weight: 600;">⚡ FYERS API v3 સંચાલિત</span>
+                    <span style="background: rgba(16, 185, 129, 0.15); border: 1px solid rgba(16, 185, 129, 0.3); color: #34D399; padding: 6px 14px; border-radius: 20px; font-size: 12.5px; font-weight: 600;">🎯 6 મલ્ટીપલ સ્ટ્રેટેજી ફિલ્ટર્સ</span>
+                    <span style="background: rgba(245, 158, 11, 0.15); border: 1px solid rgba(245, 158, 11, 0.3); color: #FCD34D; padding: 6px 14px; border-radius: 20px; font-size: 12.5px; font-weight: 600;">🛡️ પ્રિસિઝન સ્ટોપલોસ & ટાર્ગેટ્સ</span>
+                </div>
+            </div>
+            """,
+            unsafe_allow_html=True
+        )
 
 
 # =============================================================
@@ -1791,11 +1961,14 @@ with nav_tab_ha:
                 completed_count = 0
                 total_s = len(future_map)
                 for f in as_completed(future_map):
-                    res = f.result()
-                    if res:
-                        results_ha.append(res)
                     completed_count += 1
                     progress_bar.progress(completed_count / total_s, text=f"🔍 સ્કેનિંગ: {completed_count}/{total_s} પૂર્ણ...")
+                    try:
+                        res = f.result(timeout=10)
+                        if res:
+                            results_ha.append(res)
+                    except Exception:
+                        pass
                     
             progress_bar.empty()
             
