@@ -2131,11 +2131,31 @@ with nav_tab_ha:
                         "stock_count": len(filtered_ha),
                         "stocks": filtered_ha
                     })
-                    st.toast(f"✅ {len(filtered_ha)} સ્ટોક્સનું Snapshot '{now_str}' તારીખ સાથે ડેટાબેઝમાં સેવ થઈ ગયું!", icon="💾")
+                    st.session_state.ha_last_saved_snapshot_id = snap_id
+                    st.toast(f"✅ {len(filtered_ha)} સ્ટોક્સનું Snapshot '{now_str}' તારીખ સાથે સેવ થઈ ગયું!", icon="💾")
                     st.rerun()
 
             with col_act2:
-                csv_bytes = df_display.to_csv(index=False).encode('utf-8')
+                # Prepare clean Excel-friendly CSV with BOM (utf-8-sig) to eliminate garbled characters in MS Excel
+                csv_rows = []
+                for item in filtered_ha:
+                    clean_status = item.get('status', '')
+                    for emoji_char in ["🚀 ", "👀 ", "📉 ", "🟢 ", "🔴 "]:
+                        clean_status = clean_status.replace(emoji_char, "")
+                    clean_trend = "Bullish" if item.get('weekly_bullish') else "Bearish"
+                    csv_rows.append({
+                        "Stock": item.get('symbol', ''),
+                        "LTP (₹)": round(float(item.get('price', 0)), 2),
+                        "Change %": round(float(item.get('change', 0)), 2),
+                        "Status": clean_status,
+                        "Red Candles": int(item.get('red_count', 0)),
+                        "Donchian SL (₹)": round(float(item.get('stop_loss', 0)), 2),
+                        "Risk %": round(float(item.get('risk_pct', 0)), 1),
+                        "Vol Ratio": round(float(item.get('vol_ratio', 1)), 2),
+                        "Weekly Trend": clean_trend
+                    })
+                df_clean_csv = pd.DataFrame(csv_rows)
+                csv_bytes = df_clean_csv.to_csv(index=False).encode('utf-8-sig')
                 csv_filename = f"HeikinAshi_{curr_ha_filter}_{datetime.datetime.now().strftime('%Y%m%d_%H%M')}.csv"
                 st.download_button(
                     label=f"📥 Download Excel / CSV",
@@ -2243,9 +2263,20 @@ with nav_tab_ha:
         
         c_snap_sel, c_snap_del = st.columns([4, 1.2])
         with c_snap_sel:
+            default_snap_idx = 0
+            if "ha_last_saved_snapshot_id" in st.session_state:
+                for idx, s in enumerate(saved_snaps):
+                    if s["id"] == st.session_state.ha_last_saved_snapshot_id:
+                        default_snap_idx = idx
+                        break
+            # Ensure chosen index is within bounds of saved_snaps
+            if "ha_hist_snap_select" in st.session_state:
+                if st.session_state.ha_hist_snap_select >= len(saved_snaps):
+                    st.session_state.ha_hist_snap_select = 0
             chosen_snap_idx = st.selectbox(
                 "તપાસવા માટે જૂનો સ્કેન પસંદ કરો:",
                 options=range(len(saved_snaps)),
+                index=default_snap_idx,
                 format_func=lambda i: snap_labels[i],
                 key="ha_hist_snap_select"
             )
@@ -2403,7 +2434,7 @@ with nav_tab_ha:
             st.dataframe(perf_df, use_container_width=True, hide_index=True)
             
             with c_ev_down:
-                eval_csv = perf_df.to_csv(index=False).encode('utf-8')
+                eval_csv = perf_df.to_csv(index=False).encode('utf-8-sig')
                 st.download_button(
                     label=f"📥 Download Report (CSV)",
                     data=eval_csv,
@@ -2414,7 +2445,13 @@ with nav_tab_ha:
                 )
         else:
             raw_table = []
+            clean_raw_csv_rows = []
             for item in snap_stocks:
+                clean_stat = item.get('status', '-')
+                for emoji_char in ["🚀 ", "👀 ", "📉 ", "🟢 ", "🔴 "]:
+                    clean_stat = clean_stat.replace(emoji_char, "")
+                clean_trend = "Bullish" if item.get('weekly_bullish') else "Bearish"
+
                 raw_table.append({
                     "Stock": item.get('symbol', '-'),
                     "સ્કેન વખતનો ભાવ": f"₹{float(item.get('price', 0)):.2f}",
@@ -2425,9 +2462,19 @@ with nav_tab_ha:
                     "Risk %": f"{float(item.get('risk_pct', 0)):.1f}%",
                     "Weekly Trend": "🟢 Bullish" if item.get('weekly_bullish') else "🔴 Bearish"
                 })
+                clean_raw_csv_rows.append({
+                    "Stock": item.get('symbol', '-'),
+                    "સ્કેન વખતનો ભાવ (₹)": round(float(item.get('price', 0)), 2),
+                    "Change %": round(float(item.get('change', 0)), 2),
+                    "Status": clean_stat,
+                    "Red Candles": int(item.get('red_count', 0)),
+                    "Donchian SL (₹)": round(float(item.get('stop_loss', 0)), 2),
+                    "Risk %": round(float(item.get('risk_pct', 0)), 1),
+                    "Weekly Trend": clean_trend
+                })
             st.dataframe(pd.DataFrame(raw_table), use_container_width=True, hide_index=True)
             with c_ev_down:
-                raw_csv = pd.DataFrame(raw_table).to_csv(index=False).encode('utf-8')
+                raw_csv = pd.DataFrame(clean_raw_csv_rows).to_csv(index=False).encode('utf-8-sig')
                 st.download_button(
                     label=f"📥 Download Snapshot (CSV)",
                     data=raw_csv,

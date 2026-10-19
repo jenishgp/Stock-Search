@@ -89,6 +89,8 @@ def init_db():
             _migrate_json_alert_state()
             cursor.execute("INSERT OR REPLACE INTO meta_kv (key, value) VALUES ('json_migrated', '1')")
             
+        # Ensure scan snapshots are always imported into SQLite on startup
+        _ensure_snapshots_imported(conn)
         conn.commit()
 
 def _migrate_json_trades():
@@ -327,6 +329,52 @@ def save_alert_state(state_dict):
 # -------------------------------------------------------------
 # Scan Snapshot Operations (Historical Screener Archive)
 # -------------------------------------------------------------
+def _ensure_snapshots_imported(conn=None):
+    """
+    Ensures all snapshots from scan_snapshots.json are imported into SQLite.
+    Runs idempotently on every snapshot operation so historical data is never lost.
+    """
+    if not os.path.exists(SNAPSHOTS_FILE):
+        return
+    try:
+        with open(SNAPSHOTS_FILE, "r", encoding="utf-8") as f:
+            cached_snaps = json.load(f)
+        if not isinstance(cached_snaps, list) or len(cached_snaps) == 0:
+            return
+
+        def _do_insert(c):
+            for s in cached_snaps:
+                sid = s.get("id")
+                if not sid:
+                    continue
+                c.execute("""
+                    INSERT OR IGNORE INTO scan_snapshots (
+                        id, scan_date, strategy, basket, timeframe, filter_type, stock_count, stocks_json, created_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """, (
+                    sid,
+                    s.get("scan_date", ""),
+                    s.get("strategy", "Heikin Ashi Trend Rider"),
+                    s.get("basket", "Total F&O"),
+                    s.get("timeframe", "Daily"),
+                    s.get("filter_type", "ALL"),
+                    int(s.get("stock_count", len(s.get("stocks", [])))),
+                    json.dumps(s.get("stocks", []), ensure_ascii=False),
+                    s.get("created_at", get_ist_now().isoformat())
+                ))
+
+        if conn is not None:
+            cursor = conn.cursor()
+            _do_insert(cursor)
+            conn.commit()
+        else:
+            with get_db_connection() as c:
+                cur = c.cursor()
+                _do_insert(cur)
+                c.commit()
+    except Exception as e:
+        print(f"[DB] Error ensuring snapshots imported: {e}")
+
 def _sync_snapshots_to_json():
     """Syncs all SQLite snapshots to scan_snapshots.json backup."""
     try:
@@ -351,8 +399,9 @@ def _sync_snapshots_to_json():
                     "stocks": stocks,
                     "created_at": r["created_at"]
                 })
-        with open(SNAPSHOTS_FILE, "w", encoding="utf-8") as f:
-            json.dump(snaps, f, indent=2, ensure_ascii=False)
+        if snaps:
+            with open(SNAPSHOTS_FILE, "w", encoding="utf-8") as f:
+                json.dump(snaps, f, indent=2, ensure_ascii=False)
     except Exception as e:
         print(f"[DB] Error syncing snapshots to JSON: {e}")
 
@@ -360,6 +409,8 @@ def save_scan_snapshot(snap_dict):
     """Saves a scan result snapshot into SQLite database and syncs to JSON."""
     init_db()
     with get_db_connection() as conn:
+        # 1. Guarantee all previous JSON snapshots are imported first
+        _ensure_snapshots_imported(conn)
         cursor = conn.cursor()
         cursor.execute("""
             INSERT OR REPLACE INTO scan_snapshots (
@@ -373,7 +424,7 @@ def save_scan_snapshot(snap_dict):
             snap_dict.get("timeframe", "Daily"),
             snap_dict.get("filter_type", "ALL"),
             int(snap_dict.get("stock_count", len(snap_dict.get("stocks", [])))),
-            json.dumps(snap_dict.get("stocks", [])),
+            json.dumps(snap_dict.get("stocks", []), ensure_ascii=False),
             snap_dict.get("created_at", get_ist_now().isoformat())
         ))
         conn.commit()
@@ -381,62 +432,51 @@ def save_scan_snapshot(snap_dict):
     return True
 
 def load_scan_snapshots(strategy=None):
-    """Loads scan snapshots ordered by created_at DESC, with auto-restore from JSON if DB empty."""
+    """Loads scan snapshots ordered by created_at DESC, always guaranteed from DB or JSON."""
     init_db()
-    with get_db_connection() as conn:
-        cursor = conn.cursor()
-        cursor.execute("SELECT COUNT(*) FROM scan_snapshots")
-        count = cursor.fetchone()[0]
+    snaps = []
+    try:
+        with get_db_connection() as conn:
+            _ensure_snapshots_imported(conn)
+            cursor = conn.cursor()
+            if strategy:
+                cursor.execute("SELECT * FROM scan_snapshots WHERE strategy LIKE ? ORDER BY created_at DESC", (f"%{strategy}%",))
+            else:
+                cursor.execute("SELECT * FROM scan_snapshots ORDER BY created_at DESC")
+            rows = cursor.fetchall()
+            for r in rows:
+                try:
+                    stocks = json.loads(r["stocks_json"])
+                except Exception:
+                    stocks = []
+                snaps.append({
+                    "id": r["id"],
+                    "scan_date": r["scan_date"],
+                    "strategy": r["strategy"],
+                    "basket": r["basket"],
+                    "timeframe": r["timeframe"],
+                    "filter_type": r["filter_type"],
+                    "stock_count": r["stock_count"],
+                    "stocks": stocks,
+                    "created_at": r["created_at"]
+                })
+    except Exception as e:
+        print(f"[DB] Error reading snapshots from SQLite: {e}")
 
-        # Auto-restore from scan_snapshots.json if SQLite is fresh/empty (e.g. Streamlit Cloud boot)
-        if count == 0 and os.path.exists(SNAPSHOTS_FILE):
-            try:
-                with open(SNAPSHOTS_FILE, "r", encoding="utf-8") as f:
-                    cached_snaps = json.load(f)
-                if isinstance(cached_snaps, list):
-                    for s in cached_snaps:
-                        cursor.execute("""
-                            INSERT OR REPLACE INTO scan_snapshots (
-                                id, scan_date, strategy, basket, timeframe, filter_type, stock_count, stocks_json, created_at
-                            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-                        """, (
-                            s.get("id"),
-                            s.get("scan_date"),
-                            s.get("strategy", "Heikin Ashi Trend Rider"),
-                            s.get("basket", "Total F&O"),
-                            s.get("timeframe", "Daily"),
-                            s.get("filter_type", "ALL"),
-                            int(s.get("stock_count", len(s.get("stocks", [])))),
-                            json.dumps(s.get("stocks", [])),
-                            s.get("created_at", get_ist_now().isoformat())
-                        ))
-                    conn.commit()
-            except Exception as e:
-                print(f"[DB] Error restoring snapshots from JSON: {e}")
+    # Rock-solid fallback: If DB returned empty, read directly from scan_snapshots.json
+    if not snaps and os.path.exists(SNAPSHOTS_FILE):
+        try:
+            with open(SNAPSHOTS_FILE, "r", encoding="utf-8") as f:
+                cached_snaps = json.load(f)
+            if isinstance(cached_snaps, list):
+                if strategy:
+                    snaps = [s for s in cached_snaps if strategy.lower() in s.get("strategy", "").lower()]
+                else:
+                    snaps = cached_snaps
+        except Exception as e:
+            print(f"[DB] Fallback reading scan_snapshots.json failed: {e}")
 
-        if strategy:
-            cursor.execute("SELECT * FROM scan_snapshots WHERE strategy = ? ORDER BY created_at DESC", (strategy,))
-        else:
-            cursor.execute("SELECT * FROM scan_snapshots ORDER BY created_at DESC")
-        rows = cursor.fetchall()
-        snaps = []
-        for r in rows:
-            try:
-                stocks = json.loads(r["stocks_json"])
-            except Exception:
-                stocks = []
-            snaps.append({
-                "id": r["id"],
-                "scan_date": r["scan_date"],
-                "strategy": r["strategy"],
-                "basket": r["basket"],
-                "timeframe": r["timeframe"],
-                "filter_type": r["filter_type"],
-                "stock_count": r["stock_count"],
-                "stocks": stocks,
-                "created_at": r["created_at"]
-            })
-        return snaps
+    return snaps
 
 def delete_scan_snapshot(snap_id):
     """Deletes a scan snapshot by ID and updates JSON."""
