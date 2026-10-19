@@ -9,11 +9,18 @@ import numpy as np
 from datetime import datetime, timedelta
 import altair as alt
 
+SYMBOL_ALIASES = {
+    "GMRINFRA": "GMRAIRPORT",
+    "MCDOWELL-N": "UNITDSPR",
+    "MCDOWELL_N": "UNITDSPR",
+}
+
 def get_tradingview_symbol(symbol):
     """Converts local ticker symbol to TradingView NSE symbol."""
     if not symbol:
         return "NSE:NIFTY"
     clean = symbol.replace(".NS", "").replace(".BO", "").strip().upper()
+    clean = SYMBOL_ALIASES.get(clean, clean)
     if clean in ["^NSEI", "NIFTY", "NIFTY50", "NIFTY 50"]:
         return "NSE:NIFTY"
     elif clean in ["^NSEBANK", "BANKNIFTY", "BANK NIFTY"]:
@@ -27,6 +34,7 @@ def get_fyers_symbol(symbol):
     if not symbol:
         return "NSE:NIFTY50-INDEX"
     clean = symbol.replace(".NS", "").replace(".BO", "").replace("^", "").replace("NSE:", "").strip().upper()
+    clean = SYMBOL_ALIASES.get(clean, clean)
     if clean in ["NSEI", "NIFTY", "NIFTY50", "NIFTY 50"]:
         return "NSE:NIFTY50-INDEX"
     elif clean in ["NSEBANK", "BANKNIFTY", "BANK NIFTY"]:
@@ -40,7 +48,7 @@ def get_fyers_symbol(symbol):
 def fetch_fyers_chart_df(symbol, interval="D", days=180):
     """Fetches high-precision historical candles directly from Fyers API."""
     try:
-        from core.fyers_auth import get_fyers_client
+        from core.fyers_auth import get_fyers_client, safe_fyers_history
         ok, fyers = get_fyers_client()
         if not ok:
             return None
@@ -67,7 +75,7 @@ def fetch_fyers_chart_df(symbol, interval="D", days=180):
             "range_to": to_d,
             "cont_flag": "1"
         }
-        resp = fyers.history(data=data)
+        resp = safe_fyers_history(fyers, data)
         candles = resp.get("candles", [])
         if not candles:
             return None

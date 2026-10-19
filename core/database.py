@@ -9,6 +9,7 @@ import datetime
 from .config import get_ist_now, ACTIVE_TRADES_FILE, STATE_FILE
 
 DB_FILE = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "trades.db")
+SNAPSHOTS_FILE = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "scan_snapshots.json")
 
 def get_db_connection():
     """Returns a SQLite connection with timeout and Row factory."""
@@ -326,8 +327,37 @@ def save_alert_state(state_dict):
 # -------------------------------------------------------------
 # Scan Snapshot Operations (Historical Screener Archive)
 # -------------------------------------------------------------
+def _sync_snapshots_to_json():
+    """Syncs all SQLite snapshots to scan_snapshots.json backup."""
+    try:
+        with get_db_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("SELECT * FROM scan_snapshots ORDER BY created_at DESC")
+            rows = cursor.fetchall()
+            snaps = []
+            for r in rows:
+                try:
+                    stocks = json.loads(r["stocks_json"])
+                except Exception:
+                    stocks = []
+                snaps.append({
+                    "id": r["id"],
+                    "scan_date": r["scan_date"],
+                    "strategy": r["strategy"],
+                    "basket": r["basket"],
+                    "timeframe": r["timeframe"],
+                    "filter_type": r["filter_type"],
+                    "stock_count": r["stock_count"],
+                    "stocks": stocks,
+                    "created_at": r["created_at"]
+                })
+        with open(SNAPSHOTS_FILE, "w", encoding="utf-8") as f:
+            json.dump(snaps, f, indent=2, ensure_ascii=False)
+    except Exception as e:
+        print(f"[DB] Error syncing snapshots to JSON: {e}")
+
 def save_scan_snapshot(snap_dict):
-    """Saves a scan result snapshot into SQLite database."""
+    """Saves a scan result snapshot into SQLite database and syncs to JSON."""
     init_db()
     with get_db_connection() as conn:
         cursor = conn.cursor()
@@ -347,13 +377,43 @@ def save_scan_snapshot(snap_dict):
             snap_dict.get("created_at", get_ist_now().isoformat())
         ))
         conn.commit()
+    _sync_snapshots_to_json()
     return True
 
 def load_scan_snapshots(strategy=None):
-    """Loads scan snapshots ordered by created_at DESC."""
+    """Loads scan snapshots ordered by created_at DESC, with auto-restore from JSON if DB empty."""
     init_db()
     with get_db_connection() as conn:
         cursor = conn.cursor()
+        cursor.execute("SELECT COUNT(*) FROM scan_snapshots")
+        count = cursor.fetchone()[0]
+
+        # Auto-restore from scan_snapshots.json if SQLite is fresh/empty (e.g. Streamlit Cloud boot)
+        if count == 0 and os.path.exists(SNAPSHOTS_FILE):
+            try:
+                with open(SNAPSHOTS_FILE, "r", encoding="utf-8") as f:
+                    cached_snaps = json.load(f)
+                if isinstance(cached_snaps, list):
+                    for s in cached_snaps:
+                        cursor.execute("""
+                            INSERT OR REPLACE INTO scan_snapshots (
+                                id, scan_date, strategy, basket, timeframe, filter_type, stock_count, stocks_json, created_at
+                            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        """, (
+                            s.get("id"),
+                            s.get("scan_date"),
+                            s.get("strategy", "Heikin Ashi Trend Rider"),
+                            s.get("basket", "Total F&O"),
+                            s.get("timeframe", "Daily"),
+                            s.get("filter_type", "ALL"),
+                            int(s.get("stock_count", len(s.get("stocks", [])))),
+                            json.dumps(s.get("stocks", [])),
+                            s.get("created_at", get_ist_now().isoformat())
+                        ))
+                    conn.commit()
+            except Exception as e:
+                print(f"[DB] Error restoring snapshots from JSON: {e}")
+
         if strategy:
             cursor.execute("SELECT * FROM scan_snapshots WHERE strategy = ? ORDER BY created_at DESC", (strategy,))
         else:
@@ -379,11 +439,12 @@ def load_scan_snapshots(strategy=None):
         return snaps
 
 def delete_scan_snapshot(snap_id):
-    """Deletes a scan snapshot by ID."""
+    """Deletes a scan snapshot by ID and updates JSON."""
     init_db()
     with get_db_connection() as conn:
         cursor = conn.cursor()
         cursor.execute("DELETE FROM scan_snapshots WHERE id = ?", (snap_id,))
         conn.commit()
+    _sync_snapshots_to_json()
     return True
 

@@ -658,10 +658,10 @@ div[class*="st-key-btn_kpi_"] > button em {
 def get_nifty_sentiment():
     # 1. Try Fyers API first (Real-time official NSE quote)
     try:
-        from core.fyers_auth import get_fyers_client
+        from core.fyers_auth import get_fyers_client, safe_fyers_quotes
         ok, fyers = get_fyers_client()
         if ok and fyers:
-            res = fyers.quotes(data={"symbols": "NSE:NIFTY50-INDEX"})
+            res = safe_fyers_quotes(fyers, data={"symbols": "NSE:NIFTY50-INDEX"})
             if res.get("s") == "ok" and "d" in res and len(res["d"]) > 0:
                 v = res["d"][0].get("v", {})
                 lp = float(v.get("lp", 0))
@@ -739,14 +739,21 @@ def scan_heikin_ashi_stock(sym, min_red_candles=5, timeframe="Daily"):
         clean_sym = sym.replace(".NS", "").replace(".BO", "").replace("^", "").strip().upper()
         ticker_sym = f"{clean_sym}.NS"
         
+        # Handle symbol renames
+        f_sym_base = clean_sym
+        if f_sym_base == "GMRINFRA": f_sym_base = "GMRAIRPORT"
+        elif f_sym_base in ["MCDOWELL-N", "MCDOWELL_N"]: f_sym_base = "UNITDSPR"
+        
         df = None
+        used_fyers = False
         # 1. Try Fyers API first
         try:
-            from core.fyers_auth import get_fyers_client
+            from core.fyers_auth import get_fyers_client, safe_fyers_history
             from datetime import datetime as _dt, timedelta as _td
             ok_f, fyers_c = get_fyers_client()
             if ok_f and fyers_c:
-                f_sym = f"NSE:{clean_sym}-EQ"
+                used_fyers = True
+                f_sym = f"NSE:{f_sym_base}-EQ"
                 res_code = "120" if timeframe == "2-Hour" else ("W" if timeframe == "Weekly" else "D")
                 days_back = 45 if timeframe == "2-Hour" else (365 if timeframe == "Weekly" else 180)
                 now_dt = _dt.now()
@@ -760,17 +767,22 @@ def scan_heikin_ashi_stock(sym, min_red_candles=5, timeframe="Daily"):
                     "range_to": to_d,
                     "cont_flag": "1"
                 }
-                res = fyers_c.history(data=d_req)
-                candles = res.get("candles", [])
+                res = safe_fyers_history(fyers_c, d_req)
+                if isinstance(res, dict) and (res.get("code") in [-300, -99] or res.get("s") == "error"):
+                    return None
+                candles = res.get("candles", []) if isinstance(res, dict) else []
                 if candles and len(candles) >= 25:
                     df = pd.DataFrame(candles, columns=['Timestamp', 'Open', 'High', 'Low', 'Close', 'Volume'])
                     df['Date'] = pd.to_datetime(df['Timestamp'], unit='s')
                     df.set_index('Date', inplace=True)
+                else:
+                    return None
         except Exception:
-            pass
+            if used_fyers:
+                return None
 
-        # 2. Fallback to yfinance
-        if df is None or len(df) < 25:
+        # 2. Fallback to yfinance only if Fyers is not configured/offline
+        if not used_fyers and (df is None or len(df) < 25):
             ticker_sym = f"{clean_sym}.NS"
             ticker = yf.Ticker(ticker_sym)
             if timeframe == "2-Hour":
@@ -899,13 +911,20 @@ def fetch_scanner_data(clean_sym):
     import time as _time
     now_ts = int(_time.time())
 
+    # Handle symbol renames
+    f_sym_base = clean_sym
+    if f_sym_base == "GMRINFRA": f_sym_base = "GMRAIRPORT"
+    elif f_sym_base in ["MCDOWELL-N", "MCDOWELL_N"]: f_sym_base = "UNITDSPR"
+
     # 1. Try Fyers API first (0.3s per stock, official NSE data, zero rate-limits)
+    used_fyers = False
     try:
-        from core.fyers_auth import get_fyers_client
+        from core.fyers_auth import get_fyers_client, safe_fyers_history
         from datetime import datetime as _dt, timedelta as _td
         ok_fyers, fyers_client = get_fyers_client()
         if ok_fyers and fyers_client:
-            f_sym = f"NSE:{clean_sym}-EQ"
+            used_fyers = True
+            f_sym = f"NSE:{f_sym_base}-EQ"
             now_dt = _dt.now()
             to_d = now_dt.strftime("%Y-%m-%d")
             from_d = (now_dt - _td(days=365)).strftime("%Y-%m-%d")
@@ -918,8 +937,10 @@ def fetch_scanner_data(clean_sym):
                 "range_to": to_d,
                 "cont_flag": "1"
             }
-            res_d = fyers_client.history(data=d_req)
-            candles_d = res_d.get("candles", [])
+            res_d = safe_fyers_history(fyers_client, d_req)
+            if isinstance(res_d, dict) and (res_d.get("code") in [-300, -99] or res_d.get("s") == "error"):
+                return None
+            candles_d = res_d.get("candles", []) if isinstance(res_d, dict) else []
 
             h1_req = {
                 "symbol": f_sym,
@@ -929,8 +950,8 @@ def fetch_scanner_data(clean_sym):
                 "range_to": to_d,
                 "cont_flag": "1"
             }
-            res_1h = fyers_client.history(data=h1_req)
-            candles_1h = res_1h.get("candles", [])
+            res_1h = safe_fyers_history(fyers_client, h1_req)
+            candles_1h = res_1h.get("candles", []) if isinstance(res_1h, dict) else []
 
             if candles_d and len(candles_d) >= 30 and candles_1h:
                 df_d = pd.DataFrame(candles_d, columns=['Timestamp', 'Open', 'High', 'Low', 'Close', 'Volume'])
@@ -950,29 +971,33 @@ def fetch_scanner_data(clean_sym):
                 }).dropna()
 
                 return df_d, df_w, df_m, df_1h
+            else:
+                return None
     except Exception:
-        pass
-
-    # 2. Fallback to yfinance with in-memory resampling
-    try:
-        ticker_sym = f"{clean_sym}.NS"
-        ticker = yf.Ticker(ticker_sym)
-        df_d = ticker.history(period="1y", interval="1d").dropna(subset=['Close', 'High', 'Low', 'Volume'])
-        df_1h = ticker.history(period="1mo", interval="1h").dropna(subset=['Close', 'High', 'Low', 'Volume'])
-        
-        if df_d.empty or len(df_d) < 30 or df_1h.empty:
+        if used_fyers:
             return None
 
-        df_w = df_d.resample('W-FRI').agg({
-            'Open': 'first', 'High': 'max', 'Low': 'min', 'Close': 'last', 'Volume': 'sum'
-        }).dropna()
-        df_m = df_d.resample('ME').agg({
-            'Open': 'first', 'High': 'max', 'Low': 'min', 'Close': 'last', 'Volume': 'sum'
-        }).dropna()
+    # 2. Fallback to yfinance only if Fyers was not used
+    if not used_fyers:
+        try:
+            ticker_sym = f"{clean_sym}.NS"
+            ticker = yf.Ticker(ticker_sym)
+            df_d = ticker.history(period="1y", interval="1d").dropna(subset=['Close', 'High', 'Low', 'Volume'])
+            df_1h = ticker.history(period="1mo", interval="1h").dropna(subset=['Close', 'High', 'Low', 'Volume'])
+            
+            if df_d.empty or len(df_d) < 30 or df_1h.empty:
+                return None
 
-        return df_d, df_w, df_m, df_1h
-    except Exception:
-        return None
+            df_w = df_d.resample('W-FRI').agg({
+                'Open': 'first', 'High': 'max', 'Low': 'min', 'Close': 'last', 'Volume': 'sum'
+            }).dropna()
+            df_m = df_d.resample('ME').agg({
+                'Open': 'first', 'High': 'max', 'Low': 'min', 'Close': 'last', 'Volume': 'sum'
+            }).dropna()
+
+            return df_d, df_w, df_m, df_1h
+        except Exception:
+            return None
 
 def scan_stock(sym):
     try:
@@ -1383,7 +1408,7 @@ with nav_tab_screener:
         
         if is_auto_scan:
             with st.spinner(f"🔄 લાઈવ માર્કેટ સ્કેનર ઓટો-અપડેટ થઈ રહ્યું છે ({total} શેરો)..."):
-                with ThreadPoolExecutor(max_workers=10) as executor:
+                with ThreadPoolExecutor(max_workers=5) as executor:
                     future_to_stock = {executor.submit(scan_stock, sym): sym for sym in tickers_to_scan}
                     for future in as_completed(future_to_stock):
                         try:
@@ -1394,7 +1419,7 @@ with nav_tab_screener:
                             pass
         else:
             progress_bar = st.progress(0, text="સ્કેનિંગ શરૂ થઈ રહ્યું છે...")
-            with ThreadPoolExecutor(max_workers=10) as executor:
+            with ThreadPoolExecutor(max_workers=5) as executor:
                 future_to_stock = {executor.submit(scan_stock, sym): sym for sym in tickers_to_scan}
                 completed = 0
                 for future in as_completed(future_to_stock):
@@ -1936,9 +1961,17 @@ with nav_tab_ha:
     elif "Weekly" in ha_timeframe:
         tf_str = "Weekly"
 
-    if "ha_screener_results" not in st.session_state:
+    if "ha_screener_results" not in st.session_state or st.session_state.ha_screener_results is None:
         st.session_state.ha_screener_results = None
         st.session_state.ha_screener_filter = "ALL"
+        st.session_state.ha_loaded_from_snapshot = None
+        try:
+            latest_snaps = load_scan_snapshots(strategy="Heikin Ashi Trend Rider")
+            if latest_snaps and len(latest_snaps) > 0:
+                st.session_state.ha_screener_results = latest_snaps[0].get("stocks", [])
+                st.session_state.ha_loaded_from_snapshot = latest_snaps[0].get("scan_date", "")
+        except Exception:
+            pass
 
     if start_ha_scan:
         if "Custom Watchlist" in ha_selected_basket:
@@ -1953,7 +1986,7 @@ with nav_tab_ha:
             results_ha = []
             from concurrent.futures import ThreadPoolExecutor, as_completed
             
-            with ThreadPoolExecutor(max_workers=10) as executor:
+            with ThreadPoolExecutor(max_workers=5) as executor:
                 future_map = {
                     executor.submit(scan_heikin_ashi_stock, s, ha_min_red, tf_str): s 
                     for s in ha_symbols_to_scan
@@ -1975,12 +2008,15 @@ with nav_tab_ha:
             if results_ha:
                 results_ha.sort(key=lambda x: (x['priority'], -x['red_count']))
                 st.session_state.ha_screener_results = results_ha
+                st.session_state.ha_loaded_from_snapshot = None
                 st.toast(f"✅ {len(results_ha)} સ્ટોક્સનું હાઇકિન-આશી સ્કેનિંગ પૂર્ણ થયું!", icon="🚀")
             else:
                 st.error("કોઈ સ્ટોકનો ડેટા મળ્યો નથી.")
 
     # Render Results if available
     if st.session_state.ha_screener_results:
+        if st.session_state.get("ha_loaded_from_snapshot"):
+            st.info(f"💾 **છેલ્લા સેવ કરેલ સ્કેનનો ડેટા ({st.session_state.ha_loaded_from_snapshot}) લોડ કરેલ છે.** આજના તાજા લાઈવ સ્કેન માટે ઉપર આપેલ લીલું **'🚀 Scan Reversals'** બટન દબાવો.")
         all_ha_res = st.session_state.ha_screener_results
         
         c_fresh = [r for r in all_ha_res if r['priority'] == 1]
@@ -2247,59 +2283,83 @@ with nav_tab_ha:
             
         if btn_eval:
             with st.spinner(f"⏳ {len(snap_stocks)} સ્ટોક્સના આજના લાઈવ ભાવ મેળવી પરફોર્મન્સ કેલ્ક્યુલેટ થઈ રહ્યું છે..."):
+                # 1. Try batch fetching quotes from Fyers API (instant, ~1s for all 175 stocks)
+                live_prices = {}
+                try:
+                    from core.fyers_auth import get_fyers_client, safe_fyers_quotes
+                    ok_f, fyers_c = get_fyers_client()
+                    if ok_f and fyers_c:
+                        all_symbols = [s.get("symbol", "").replace(".NS", "").strip().upper() for s in snap_stocks]
+                        chunk_size = 40
+                        for i in range(0, len(all_symbols), chunk_size):
+                            chunk = all_symbols[i:i+chunk_size]
+                            fyers_sym_list = []
+                            for sym in chunk:
+                                b_sym = sym
+                                if b_sym == "GMRINFRA": b_sym = "GMRAIRPORT"
+                                elif b_sym in ["MCDOWELL-N", "MCDOWELL_N"]: b_sym = "UNITDSPR"
+                                fyers_sym_list.append(f"NSE:{b_sym}-EQ")
+                            q_resp = safe_fyers_quotes(fyers_c, {"symbols": ",".join(fyers_sym_list)})
+                            if isinstance(q_resp, dict) and q_resp.get("s") == "ok":
+                                for item in q_resp.get("d", []):
+                                    v = item.get("v", {})
+                                    lp = v.get("lp") or v.get("cmd", {}).get("c")
+                                    if lp:
+                                        raw_n = item.get("n", "").replace("NSE:", "").replace("-EQ", "")
+                                        live_prices[raw_n] = float(lp)
+                                        if raw_n == "GMRAIRPORT": live_prices["GMRINFRA"] = float(lp)
+                                        if raw_n == "UNITDSPR": live_prices["MCDOWELL-N"] = float(lp)
+                except Exception:
+                    pass
+
                 def fetch_perf_item(item):
-                    sym = item.get("symbol", "")
-                    full_s = f"{sym}.NS" if not sym.endswith(".NS") else sym
+                    sym = item.get("symbol", "").replace(".NS", "").strip().upper()
+                    full_s = f"{sym}.NS"
                     entry_p = float(item.get("price", 0))
                     sl_val = float(item.get("stop_loss", entry_p * 0.95))
-                    try:
-                        tkr = yf.Ticker(full_s)
-                        h = tkr.history(period="5d", interval="1d")
-                        if not h.empty:
-                            curr_p = float(h['Close'].iloc[-1])
-                            chg_pts = curr_p - entry_p
-                            ret_pct = (chg_pts / entry_p) * 100 if entry_p > 0 else 0
-                            
-                            is_sl_hit = (curr_p <= sl_val)
-                            risk_amt = entry_p - sl_val if entry_p > sl_val else entry_p * 0.02
-                            target_2r = entry_p + (2.0 * risk_amt)
-                            is_target_hit = (curr_p >= target_2r)
-                            
-                            if is_target_hit:
-                                outcome = "🎉 TARGET 1:2+ HIT"
-                            elif ret_pct >= 2.0:
-                                outcome = "🟢 નફામાં (Profitable)"
-                            elif is_sl_hit:
-                                outcome = "🚨 DONCHIAN SL HIT"
-                            elif ret_pct < 0:
-                                outcome = "🟡 પુલબેક (SL બચેલો)"
-                            else:
-                                outcome = "⚪ ફ્લેટ / રેન્જમાં"
-                                
-                            return {
-                                "Stock": sym,
-                                "સ્કેન વખતે ભાવ": entry_p,
-                                "આજનો લાઈવ ભાવ": curr_p,
-                                "રીટર્ન (%)": ret_pct,
-                                "Donchian SL": sl_val,
-                                "પરિણામ (Outcome)": outcome,
-                                "is_profit": ret_pct > 0,
-                                "is_sl": is_sl_hit
-                            }
-                    except Exception:
-                        pass
+                    curr_p = live_prices.get(sym)
+                    if curr_p is None:
+                        try:
+                            tkr = yf.Ticker(full_s)
+                            h = tkr.history(period="5d", interval="1d")
+                            if not h.empty:
+                                curr_p = float(h['Close'].iloc[-1])
+                        except Exception:
+                            pass
+                    if curr_p is None:
+                        curr_p = entry_p
+
+                    chg_pts = curr_p - entry_p
+                    ret_pct = (chg_pts / entry_p) * 100 if entry_p > 0 else 0
+                    
+                    is_sl_hit = (curr_p <= sl_val)
+                    risk_amt = entry_p - sl_val if entry_p > sl_val else entry_p * 0.02
+                    target_2r = entry_p + (2.0 * risk_amt)
+                    is_target_hit = (curr_p >= target_2r)
+                    
+                    if is_target_hit:
+                        outcome = "🎉 TARGET 1:2+ HIT"
+                    elif ret_pct >= 2.0:
+                        outcome = "🟢 નફામાં (Profitable)"
+                    elif is_sl_hit:
+                        outcome = "🚨 DONCHIAN SL HIT"
+                    elif ret_pct < 0:
+                        outcome = "🟡 પુલબેક (SL બચેલો)"
+                    else:
+                        outcome = "⚪ ફ્લેટ / રેન્જમાં"
+                        
                     return {
                         "Stock": sym,
                         "સ્કેન વખતે ભાવ": entry_p,
-                        "આજનો લાઈવ ભાવ": entry_p,
-                        "રીટર્ન (%)": 0.0,
+                        "આજનો લાઈવ ભાવ": curr_p,
+                        "રીટર્ન (%)": ret_pct,
                         "Donchian SL": sl_val,
-                        "પરિણામ (Outcome)": "⚪ ડેટા લોડિંગ",
-                        "is_profit": False,
-                        "is_sl": False
+                        "પરિણામ (Outcome)": outcome,
+                        "is_profit": ret_pct > 0,
+                        "is_sl": is_sl_hit
                     }
                 
-                with ThreadPoolExecutor(max_workers=8) as ex:
+                with ThreadPoolExecutor(max_workers=5) as ex:
                     perf_results = list(ex.map(fetch_perf_item, snap_stocks))
                     
                 st.session_state[eval_key] = perf_results

@@ -14,6 +14,7 @@ import hashlib
 from urllib.parse import urlparse, parse_qs
 from datetime import datetime
 import requests
+import threading
 from fyers_apiv3 import fyersModel
 
 from core.config import (
@@ -290,3 +291,67 @@ def test_fyers_connection() -> tuple[bool, dict | str]:
         return False, f"Fyers API Error: {profile}"
     except Exception as e:
         return False, f"Exception in test_fyers_connection: {str(e)}"
+
+# -------------------------------------------------------------
+# Rate-Limited Safe API Callers (5 req/sec Standard Plan Limit)
+# -------------------------------------------------------------
+_fyers_rate_lock = threading.Lock()
+_last_fyers_req_ts = 0.0
+
+def safe_fyers_history(fyers_client, data: dict, retries: int = 2) -> dict:
+    """
+    Thread-safe history caller with strict rate-limiting (max 4.5 req/sec).
+    Prevents 'Standard plan limit of 5 requests/second' errors.
+    Automatically retries with backoff if rate-limited.
+    """
+    global _last_fyers_req_ts
+    for attempt in range(retries + 1):
+        with _fyers_rate_lock:
+            now = time.time()
+            elapsed = now - _last_fyers_req_ts
+            if elapsed < 0.22:
+                time.sleep(0.22 - elapsed)
+            _last_fyers_req_ts = time.time()
+
+        try:
+            res = fyers_client.history(data=data)
+            if isinstance(res, dict):
+                msg = str(res.get("message", "")).lower()
+                if "requests/second" in msg:
+                    time.sleep(0.5)
+                    continue
+            return res
+        except Exception as e:
+            if attempt < retries:
+                time.sleep(0.5)
+                continue
+            return {"s": "error", "message": str(e)}
+    return {"s": "error", "message": "Max retries exceeded"}
+
+def safe_fyers_quotes(fyers_client, data: dict, retries: int = 2) -> dict:
+    """
+    Thread-safe quotes caller with strict rate-limiting.
+    """
+    global _last_fyers_req_ts
+    for attempt in range(retries + 1):
+        with _fyers_rate_lock:
+            now = time.time()
+            elapsed = now - _last_fyers_req_ts
+            if elapsed < 0.22:
+                time.sleep(0.22 - elapsed)
+            _last_fyers_req_ts = time.time()
+
+        try:
+            res = fyers_client.quotes(data=data)
+            if isinstance(res, dict):
+                msg = str(res.get("message", "")).lower()
+                if "requests/second" in msg:
+                    time.sleep(0.5)
+                    continue
+            return res
+        except Exception as e:
+            if attempt < retries:
+                time.sleep(0.5)
+                continue
+            return {"s": "error", "message": str(e)}
+    return {"s": "error", "message": "Max retries exceeded"}
