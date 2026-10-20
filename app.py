@@ -8,6 +8,8 @@ import pandas as pd
 import numpy as np
 import altair as alt
 from concurrent.futures import ThreadPoolExecutor, as_completed
+import socket
+socket.setdefaulttimeout(10.0)
 
 from core.config import get_ist_now, is_market_open, DEFAULT_WATCHLIST
 from core.alerts import send_telegram_alert
@@ -941,6 +943,8 @@ def fetch_scanner_data(clean_sym):
             if isinstance(res_d, dict) and (res_d.get("code") in [-300, -99] or res_d.get("s") == "error"):
                 return None
             candles_d = res_d.get("candles", []) if isinstance(res_d, dict) else []
+            if not candles_d or len(candles_d) < 30:
+                return None
 
             h1_req = {
                 "symbol": f_sym,
@@ -983,9 +987,10 @@ def fetch_scanner_data(clean_sym):
             ticker_sym = f"{clean_sym}.NS"
             ticker = yf.Ticker(ticker_sym)
             df_d = ticker.history(period="1y", interval="1d").dropna(subset=['Close', 'High', 'Low', 'Volume'])
+            if df_d.empty or len(df_d) < 30:
+                return None
             df_1h = ticker.history(period="1mo", interval="1h").dropna(subset=['Close', 'High', 'Low', 'Volume'])
-            
-            if df_d.empty or len(df_d) < 30 or df_1h.empty:
+            if df_1h.empty:
                 return None
 
             df_w = df_d.resample('W-FRI').agg({
@@ -1340,18 +1345,18 @@ with nav_tab_screener:
             with auto_col2:
                 freq_choice = st.selectbox(
                     "આવર્તન",
-                    options=["⚡ 1 Min (60s)", "⏱️ 2 Min (120s)", "⏳ 5 Min (300s)"],
+                    options=["⌛ 5 Min (300s)", "⏱️ 3 Min (180s)", "⚡ 2 Min (120s)"],
                     index=0,
                     label_visibility="collapsed",
                     disabled=not auto_update_enabled
                 )
 
     freq_seconds_map = {
-        "⚡ 1 Min (60s)": 60,
-        "⏱️ 2 Min (120s)": 120,
-        "⏳ 5 Min (300s)": 300
+        "⌛ 5 Min (300s)": 300,
+        "⏱️ 3 Min (180s)": 180,
+        "⚡ 2 Min (120s)": 120
     }
-    interval_sec = freq_seconds_map.get(freq_choice, 60)
+    interval_sec = freq_seconds_map.get(freq_choice, 300)
     interval_ms = interval_sec * 1000
 
     # Auto-load cached scan results on startup
@@ -1372,8 +1377,11 @@ with nav_tab_screener:
             except Exception:
                 pass
 
-    # Mount Auto-Refresh trigger
-    if auto_update_enabled and st_autorefresh is not None:
+    market_is_open, market_status_msg = is_market_open()
+    is_currently_scanning = st.session_state.get("is_screener_scanning", False)
+
+    # Mount Auto-Refresh trigger ONLY during active market hours (Mon-Fri 09:15-15:30 IST) and when not scanning
+    if auto_update_enabled and market_is_open and not is_currently_scanning and st_autorefresh is not None:
         st_autorefresh(interval=interval_ms, key="screener_autorefresh_trigger")
 
     now_ts = time.time()
@@ -1386,94 +1394,119 @@ with nav_tab_screener:
         basket_changed = True
     st.session_state.screener_prev_basket = selected_basket
 
-    # Determine if scan should run
+    # Determine if scan should run (Auto-scan only runs during active market hours)
     should_scan = False
     is_auto_scan = False
 
-    if start_scan or basket_changed:
-        should_scan = True
-        is_auto_scan = False
-    elif auto_update_enabled and (time_since_last_scan >= (interval_sec - 2)):
-        should_scan = True
-        is_auto_scan = True
+    if not is_currently_scanning:
+        if start_scan or basket_changed:
+            should_scan = True
+            is_auto_scan = False
+        elif auto_update_enabled and market_is_open and (time_since_last_scan >= (interval_sec - 2)):
+            should_scan = True
+            is_auto_scan = True
 
     if should_scan:
-        if "Custom Watchlist" in selected_basket:
-            tickers_to_scan = [s.strip() for s in custom_symbols_text.split(",") if s.strip()]
-        else:
-            tickers_to_scan = BASKETS.get(selected_basket, [])
+        st.session_state.is_screener_scanning = True
+        try:
+            # Pre-authenticate Fyers once on main thread before launching workers
+            try:
+                from core.fyers_auth import get_fyers_client
+                get_fyers_client()
+            except Exception:
+                pass
+
+            if "Custom Watchlist" in selected_basket:
+                tickers_to_scan = [s.strip() for s in custom_symbols_text.split(",") if s.strip()]
+            else:
+                tickers_to_scan = BASKETS.get(selected_basket, [])
+                
+            total = len(tickers_to_scan)
+            results = []
             
-        total = len(tickers_to_scan)
-        results = []
-        
-        if is_auto_scan:
-            with st.spinner(f"🔄 લાઈવ માર્કેટ સ્કેનર ઓટો-અપડેટ થઈ રહ્યું છે ({total} શેરો)..."):
+            if is_auto_scan:
+                with st.spinner(f"🔄 લાઈવ માર્કેટ સ્કેનર ઓટો-અપડેટ થઈ રહ્યું છે ({total} શેરો)..."):
+                    with ThreadPoolExecutor(max_workers=5) as executor:
+                        future_to_stock = {executor.submit(scan_stock, sym): sym for sym in tickers_to_scan}
+                        for future in as_completed(future_to_stock):
+                            try:
+                                res = future.result(timeout=10)
+                                if res:
+                                    results.append(res)
+                            except Exception:
+                                pass
+            else:
+                progress_bar = st.progress(0, text="સ્કેનિંગ શરૂ થઈ રહ્યું છે...")
                 with ThreadPoolExecutor(max_workers=5) as executor:
                     future_to_stock = {executor.submit(scan_stock, sym): sym for sym in tickers_to_scan}
+                    completed = 0
                     for future in as_completed(future_to_stock):
+                        completed += 1
+                        progress_bar.progress(completed / total, text=f"સ્કેનિંગ પ્રગતિમાં છે... ({completed}/{total} શેરો પૂરા થયા)")
                         try:
                             res = future.result(timeout=10)
                             if res:
                                 results.append(res)
                         except Exception:
                             pass
-        else:
-            progress_bar = st.progress(0, text="સ્કેનિંગ શરૂ થઈ રહ્યું છે...")
-            with ThreadPoolExecutor(max_workers=5) as executor:
-                future_to_stock = {executor.submit(scan_stock, sym): sym for sym in tickers_to_scan}
-                completed = 0
-                for future in as_completed(future_to_stock):
-                    completed += 1
-                    progress_bar.progress(completed / total, text=f"સ્કેનિંગ પ્રગતિમાં છે... ({completed}/{total} શેરો પૂરા થયા)")
-                    try:
-                        res = future.result(timeout=10)
-                        if res:
-                            results.append(res)
-                    except Exception:
-                        pass
-            progress_bar.empty()
-            
-        if results:
-            df_res = pd.DataFrame(results)
-            df_res = df_res.sort_values(by=["Score", "Change (%)"], ascending=[False, False])
-            st.session_state.screener_results = df_res
-            now_str = datetime.datetime.now().strftime("%I:%M:%S %p")
-            st.session_state.screener_last_updated = now_str
-            st.session_state.screener_last_scan_ts = time.time()
+                progress_bar.empty()
+                
+            if results:
+                df_res = pd.DataFrame(results)
+                df_res = df_res.sort_values(by=["Score", "Change (%)"], ascending=[False, False])
+                st.session_state.screener_results = df_res
+                now_str = datetime.datetime.now().strftime("%I:%M:%S %p")
+                st.session_state.screener_last_updated = now_str
+                st.session_state.screener_last_scan_ts = time.time()
 
-            # Save to screener_cache.json
-            try:
-                cache_obj = {
-                    "timestamp": now_str,
-                    "basket": selected_basket,
-                    "data": results
-                }
-                with open("screener_cache.json", "w", encoding="utf-8") as f:
-                    json.dump(cache_obj, f, indent=2, ensure_ascii=False, default=serialize_screener_data)
-            except Exception:
-                pass
+                # Save to screener_cache.json
+                try:
+                    cache_obj = {
+                        "timestamp": now_str,
+                        "basket": selected_basket,
+                        "data": results
+                    }
+                    with open("screener_cache.json", "w", encoding="utf-8") as f:
+                        json.dump(cache_obj, f, indent=2, ensure_ascii=False, default=serialize_screener_data)
+                except Exception:
+                    pass
 
-            if is_auto_scan:
-                st.toast(f"🔄 લાઈવ માર્કેટ સ્કેનર આપમેળે અપડેટ થયું! ({now_str})", icon="✅")
+                if is_auto_scan:
+                    st.toast(f"🔄 લાઈવ માર્કેટ સ્કેનર આપમેળે અપડેટ થયું! ({now_str})", icon="✅")
+                else:
+                    st.toast(f"✅ સફળતાપૂર્વક {len(results)} સ્ટોક્સનું મલ્ટી-ટાઇમફ્રેમ સ્કેનિંગ પૂરું થયું!", icon="🚀")
             else:
-                st.toast(f"✅ સફળતાપૂર્વક {len(results)} સ્ટોક્સનું મલ્ટી-ટાઇમફ્રેમ સ્કેનિંગ પૂરું થયું!", icon="🚀")
-        else:
-            if not is_auto_scan:
-                st.error("કોઈ સ્ટોકનો ડેટા મળ્યો નથી. કૃપા કરીને સિમ્બોલ ચકાસો.")
+                if not is_auto_scan:
+                    st.error("કોઈ સ્ટોકનો ડેટા મળ્યો નથી. કૃપા કરીને સિમ્બોલ ચકાસો.")
+        finally:
+            st.session_state.is_screener_scanning = False
 
     last_updated_str = st.session_state.get("screener_last_updated") or "તાજેતરનો ડેટા"
     if auto_update_enabled:
-        st.markdown(
-            f'<div style="display: flex; align-items: center; justify-content: space-between; background: rgba(16, 185, 129, 0.08); border: 1px solid rgba(16, 185, 129, 0.25); padding: 8px 16px; border-radius: 10px; margin-top: 10px; margin-bottom: 16px;">'
-            f'<div style="display: flex; align-items: center; gap: 10px;">'
-            f'<span style="display: inline-block; width: 10px; height: 10px; background: #10B981; border-radius: 50%; box-shadow: 0 0 10px #10B981;"></span>'
-            f'<span style="color: #34D399; font-weight: 700; font-size: 13.5px;">🟢 LIVE AUTO-UPDATE સક્રિય ({freq_choice})</span>'
-            f'<span style="color: #9CA3AF; font-size: 13px;">| બજારનો તાજો ડેટા આપમેળે રિફ્રેશ થઈ રહ્યો છે</span>'
-            f'</div>'
-            f'<div style="color: #E5E7EB; font-size: 13px; font-weight: 600;">છેલ્લું અપડેટ: <span style="color: #38BDF8; font-family: monospace; font-size: 14px;">{last_updated_str}</span></div>'
-            f'</div>',
-            unsafe_allow_html=True
-        )
+        if market_is_open:
+            st.markdown(
+                f'<div style="display: flex; align-items: center; justify-content: space-between; background: rgba(16, 185, 129, 0.08); border: 1px solid rgba(16, 185, 129, 0.25); padding: 8px 16px; border-radius: 10px; margin-top: 10px; margin-bottom: 16px;">'
+                f'<div style="display: flex; align-items: center; gap: 10px;">'
+                f'<span style="display: inline-block; width: 10px; height: 10px; background: #10B981; border-radius: 50%; box-shadow: 0 0 10px #10B981;"></span>'
+                f'<span style="color: #34D399; font-weight: 700; font-size: 13.5px;">🟢 LIVE AUTO-UPDATE સક્રિય ({freq_choice})</span>'
+                f'<span style="color: #9CA3AF; font-size: 13px;">| બજાર ચાલુ છે, ડેટા આપમેળે રિફ્રેશ થઈ રહ્યો છે</span>'
+                f'</div>'
+                f'<div style="color: #E5E7EB; font-size: 13px; font-weight: 600;">છેલ્લું અપડેટ: <span style="color: #38BDF8; font-family: monospace; font-size: 14px;">{last_updated_str}</span></div>'
+                f'</div>',
+                unsafe_allow_html=True
+            )
+        else:
+            st.markdown(
+                f'<div style="display: flex; align-items: center; justify-content: space-between; background: rgba(245, 158, 11, 0.08); border: 1px solid rgba(245, 158, 11, 0.25); padding: 8px 16px; border-radius: 10px; margin-top: 10px; margin-bottom: 16px;">'
+                f'<div style="display: flex; align-items: center; gap: 10px;">'
+                f'<span style="display: inline-block; width: 10px; height: 10px; background: #F59E0B; border-radius: 50%;"></span>'
+                f'<span style="color: #FBBF24; font-weight: 700; font-size: 13.5px;">⏸️ બજાર બંધ છે ({market_status_msg})</span>'
+                f'<span style="color: #9CA3AF; font-size: 13px;">| Auto-Update થોભાવેલ છે (સોમ-શુક્ર 09:15 થી 03:30 દરમિયાન આપોઆપ સક્રિય થશે)</span>'
+                f'</div>'
+                f'<div style="color: #E5E7EB; font-size: 13px; font-weight: 600;">છેલ્લો સંગ્રહિત ડેટા: <span style="color: #38BDF8; font-family: monospace; font-size: 14px;">{last_updated_str}</span></div>'
+                f'</div>',
+                unsafe_allow_html=True
+            )
     else:
         st.markdown(
             f'<div style="display: flex; align-items: center; justify-content: space-between; background: rgba(239, 68, 68, 0.08); border: 1px solid rgba(239, 68, 68, 0.2); padding: 8px 16px; border-radius: 10px; margin-top: 10px; margin-bottom: 16px;">'
@@ -1984,7 +2017,12 @@ with nav_tab_ha:
         else:
             progress_bar = st.progress(0, text="🔍 હાઇકિન-આશી અને ડોન્ચિયન સ્કેનિંગ ચાલુ છે...")
             results_ha = []
-            from concurrent.futures import ThreadPoolExecutor, as_completed
+            # Pre-authenticate Fyers once on main thread before launching workers
+            try:
+                from core.fyers_auth import get_fyers_client
+                get_fyers_client()
+            except Exception:
+                pass
             
             with ThreadPoolExecutor(max_workers=5) as executor:
                 future_map = {
