@@ -1076,9 +1076,7 @@ def run_scan_cycle(force=False, watchlist=None):
             and not res.get('is_bull_exhausted')
             and not state.get(stage1_key)
         ):
-            stage1_alert_text = format_stage1_pre_breakout_alert(res)
-            print(f"Sending STAGE-1 PRE-BREAKOUT RADAR alert for {s_name}")
-            send_telegram_alert(stage1_alert_text)
+            # Suppressed from Telegram (Only 100% Confirmed Buy alerts sent)
             state[stage1_key] = True
             new_alerts.append(f"{s_name}: STAGE-1 PRE-BREAKOUT")
 
@@ -1091,9 +1089,7 @@ def run_scan_cycle(force=False, watchlist=None):
             and not res.get('is_bear_exhausted')
             and not state.get(stage1_put_key)
         ):
-            stage1_put_text = format_stage1_put_pre_breakout_alert(res)
-            print(f"Sending STAGE-1 BEARISH PUT SQUEEZE RADAR alert for {s_name}")
-            send_telegram_alert(stage1_put_text)
+            # Suppressed from Telegram (Only 100% Confirmed alerts sent)
             state[stage1_put_key] = True
             new_alerts.append(f"{s_name}: STAGE-1 PUT SQUEEZE RADAR")
 
@@ -1106,9 +1102,7 @@ def run_scan_cycle(force=False, watchlist=None):
             and not res.get('is_bull_exhausted')
             and not state.get(pre_r3_key)
         ):
-            pre_alert_text = format_pre_r3_radar_alert(res)
-            print(f"Sending PRE-R3 ADVANCE RADAR alert for {s_name}")
-            send_telegram_alert(pre_alert_text)
+            # Suppressed from Telegram (Only 100% Confirmed alerts sent)
             state[pre_r3_key] = True
             new_alerts.append(f"{s_name}: PRE-R3 ADVANCE RADAR")
 
@@ -1121,9 +1115,7 @@ def run_scan_cycle(force=False, watchlist=None):
             and not res.get('is_bear_exhausted')
             and not state.get(pre_put_r3_key)
         ):
-            pre_put_alert_text = format_pre_put_r3_radar_alert(res)
-            print(f"Sending PRE-PUT R3 ADVANCE RADAR alert for {s_name}")
-            send_telegram_alert(pre_put_alert_text)
+            # Suppressed from Telegram (Only 100% Confirmed alerts sent)
             state[pre_put_r3_key] = True
             new_alerts.append(f"{s_name}: PRE-PUT R3 ADVANCE RADAR")
 
@@ -1234,12 +1226,9 @@ def run_scan_cycle(force=False, watchlist=None):
             except Exception as algo_err:
                 print(f"Error executing algo put entry: {algo_err}")
 
-        # 0.1 Standalone Option R3 Breakout (Option LTP >= Option R3 + Spot >= R2 + RSI 58-74)
+        # 0.1 Standalone Option R3 Breakout - Suppressed to prevent Telegram alert spam
         r3_alert_key = f"{s_name}_R3_{today_str}"
         if res.get('is_option_r3_crossed') and res.get('is_r3_rsi_confirmed', True) and not res.get('is_chasing', False) and not state.get(r3_alert_key) and not is_r3_confirmed:
-            alert_text = format_r3_radar_alert(res)
-            print(f"Sending R3 OPTION RADAR alert for {s_name}")
-            send_telegram_alert(alert_text)
             state[r3_alert_key] = True
             new_alerts.append(f"{s_name}: R3 OPTION RADAR")
 
@@ -1247,11 +1236,8 @@ def run_scan_cycle(force=False, watchlist=None):
         # to ensure the background auto-scanner focuses 100% on the Call & Put R2/R3 + Bollinger Squeeze setup
         # and completely protects Fyers API tokens.
 
-        # 1. Confirmed Sniper Buy (Includes exact OTM Call Strike & Option R3 level)
+        # 1. Confirmed Sniper Buy - Suppressed to prevent Telegram alert spam
         if is_sniper_buy and (prev_sig != curr_sig) and not state.get(r3_confirmed_key):
-            alert_text = format_sniper_buy_alert(res)
-            print(f"Sending SNIPER BUY alert for {s_name}")
-            send_telegram_alert(alert_text)
             new_alerts.append(f"{s_name}: SNIPER BUY")
 
         # NOTE: Unconfirmed "BUY ON DIPS (Wait for 1H)" and general weak bullish alerts
