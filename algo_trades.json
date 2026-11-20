@@ -2,7 +2,7 @@
   "active_trades": [],
   "closed_trades": [],
   "daily_summary": {
-    "date": "2026-11-16",
+    "date": "2026-11-20",
     "realized_pnl": 0.0,
     "unrealized_pnl": 0.0,
     "total_trades": 0,
@@ -125,6 +125,36 @@
       "pnl_pct": 0.0,
       "exit_time": "16 Nov 2026 | 13:00:00 IST",
       "realized_pnl": 0.0
+    }
+  ],
+  "algo_logs": [
+    {
+      "timestamp": "13:05:59 IST",
+      "symbol": "RELIANCE",
+      "action": "ORDER_EXECUTED",
+      "reason": "RELIANCE 26-NOV-2026 1300 CE (CE) @ ₹25.00 (1 Lots)",
+      "status": "SUCCESS"
+    },
+    {
+      "timestamp": "13:19:50 IST",
+      "symbol": "RELIANCE",
+      "action": "NIFTY_REGIME_GUARD",
+      "reason": "Skipped RELIANCE Put: Nifty 50 is Bullish (+2.01% >= +0.25%). Minervini 75% Rule: Counter-trend Put buying strictly blocked in Bull Market!",
+      "status": "STANDBY"
+    },
+    {
+      "timestamp": "13:21:12 IST",
+      "symbol": "RELIANCE",
+      "action": "NOT_FNO",
+      "reason": "Skipped RELIANCE: Excluded from NSE F&O derivatives segment",
+      "status": "STANDBY"
+    },
+    {
+      "timestamp": "13:22:08 IST",
+      "symbol": "RELIANCE",
+      "action": "ORDER_EXECUTED",
+      "reason": "RELIANCE 26-NOV-2026 1280 PE (PE) @ ₹28.13 (2 Lots)",
+      "status": "SUCCESS"
     }
   ]
 }

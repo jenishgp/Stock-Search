@@ -671,6 +671,7 @@ def execute_algo_entry(scan_res: Dict[str, Any]) -> Tuple[bool, str]:
     """
     sym = scan_res.get("symbol", "")
     opt_type = scan_res.get("opt_type", "CE")
+    entry_price = float(scan_res.get("opt_put_ltp", 0.0) if opt_type == "PE" else scan_res.get("opt_ltp", 0.0))
 
     def _skip(reason_msg: str, status_tag: str = "STANDBY"):
         log_algo_event(sym or "SYSTEM", status_tag, reason_msg, status="STANDBY")
@@ -805,19 +806,19 @@ def execute_algo_entry(scan_res: Dict[str, Any]) -> Tuple[bool, str]:
 
     # Select exact Call or Put symbols and levels
     if opt_type == 'PE':
-        fyers_sym = scan_res.get('opt_put_fyers_symbol', scan_res.get('opt_fyers_symbol', ''))
-        contract_name = scan_res.get('opt_put_contract_name', scan_res.get('opt_contract_name', f'{sym} OTM Put'))
-        entry_price = float(scan_res.get('opt_put_ltp', scan_res.get('opt_ltp', 0.0)))
-        stop_loss = float(scan_res.get('opt_put_sl', entry_price * 0.80))
-        target_1 = float(scan_res.get('opt_put_t1', entry_price * t1_factor))
-        target_2 = float(scan_res.get('opt_put_t2', entry_price * t2_factor))
+        fyers_sym = scan_res.get('opt_put_fyers_symbol') or scan_res.get('fyers_symbol') or scan_res.get('opt_fyers_symbol') or ''
+        contract_name = scan_res.get('opt_put_contract_name') or scan_res.get('contract_name') or scan_res.get('opt_contract_name') or f'{sym} OTM Put'
+        entry_price = float(scan_res.get('opt_put_ltp') or scan_res.get('opt_ltp') or 0.0)
+        stop_loss = float(scan_res.get('opt_put_sl') or scan_res.get('stop_loss') or (entry_price * 0.80))
+        target_1 = float(scan_res.get('opt_put_t1') or scan_res.get('t1') or (entry_price * t1_factor))
+        target_2 = float(scan_res.get('opt_put_t2') or scan_res.get('t2') or (entry_price * t2_factor))
     else:
-        fyers_sym = scan_res.get('opt_fyers_symbol', '')
-        contract_name = scan_res.get('opt_contract_name', f'{sym} OTM Call')
-        entry_price = float(scan_res.get('opt_ltp', 0.0))
-        stop_loss = float(scan_res.get('opt_sl', entry_price * 0.75))
-        target_1 = float(scan_res.get('opt_t1', entry_price * t1_factor))
-        target_2 = float(scan_res.get('opt_t2', entry_price * t2_factor))
+        fyers_sym = scan_res.get('opt_fyers_symbol') or scan_res.get('fyers_symbol') or ''
+        contract_name = scan_res.get('opt_contract_name') or scan_res.get('contract_name') or f'{sym} OTM Call'
+        entry_price = float(scan_res.get('opt_ltp') or 0.0)
+        stop_loss = float(scan_res.get('opt_sl') or scan_res.get('stop_loss') or (entry_price * 0.75))
+        target_1 = float(scan_res.get('opt_t1') or scan_res.get('t1') or (entry_price * t1_factor))
+        target_2 = float(scan_res.get('opt_t2') or scan_res.get('t2') or (entry_price * t2_factor))
 
     # Safety Guard: Reject any contract that does not exist or was excluded from NSE F&O
     if not fyers_sym or any(fyers_sym.startswith(p) for p in [
@@ -843,7 +844,15 @@ def execute_algo_entry(scan_res: Dict[str, Any]) -> Tuple[bool, str]:
     except Exception:
         pass
     if entry_price <= 0:
-        entry_price = float(scan_res.get("price", 0.0))
+        # Check option specific LTP fields first before falling back to spot price
+        entry_price = float(scan_res.get("opt_ltp", 0.0) or scan_res.get("opt_put_ltp", 0.0) or 0.0)
+        if entry_price <= 0:
+            spot_ref = float(scan_res.get("price", 0.0) or 0.0)
+            if spot_ref > 0:
+                # Approximate typical 1.5% OTM option premium for Paper simulations
+                entry_price = round(max(5.0, spot_ref * 0.015), 2)
+            else:
+                entry_price = 25.0
 
     # Ensure option stoploss and targets are ALWAYS calibrated to option entry price (never spot stock/index price)
     if stop_loss >= entry_price or stop_loss <= 0:

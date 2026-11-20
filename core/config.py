@@ -136,6 +136,26 @@ def get_nifty_market_regime() -> dict:
     except Exception:
         pass
 
+    # Live fallback to Yahoo Finance (^NSEI) if Fyers quote unavailable
+    try:
+        import yfinance as yf
+        t_nifty = yf.Ticker("^NSEI")
+        df_n = t_nifty.history(period="2d")
+        if df_n is not None and len(df_n) >= 2:
+            c_p = float(df_n.iloc[-1]["Close"])
+            p_c = float(df_n.iloc[-2]["Close"])
+            ch = c_p - p_c
+            chp = (ch / p_c) * 100.0
+            live_data = {"price": round(c_p, 2), "change": round(ch, 2), "pct": round(chp, 2), "is_bullish": ch >= 0}
+            try:
+                with open(cache_path, "w", encoding="utf-8") as fw:
+                    json.dump(live_data, fw)
+            except Exception:
+                pass
+            return live_data
+    except Exception:
+        pass
+
     if isinstance(cached_data, dict) and "pct" in cached_data and cached_data.get("price", 0) > 0:
         return cached_data
 

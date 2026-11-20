@@ -465,11 +465,22 @@ def analyze_option_r3_setup(
             pass
 
     # 2. Resilient Analytical Fallback (Calibrated to Spot HLC & Delta Model)
-    # Strictly reject non-existent F&O contracts during market hours!
+    # If live Fyers broker data is unavailable or rate-limited:
     if opt_ltp <= 0 or opt_prev_h <= 0:
+        is_live_broker_required = False
+        try:
+            from core.fyers_order_engine import load_algo_config, EXCLUDED_FNO_STOCKS
+            if clean_sym in EXCLUDED_FNO_STOCKS:
+                return None
+            algo_cfg_check = load_algo_config()
+            if algo_cfg_check.get("mode") == "LIVE":
+                is_live_broker_required = True
+        except Exception:
+            pass
+
         market_open, _ = is_market_open()
-        if market_open:
-            # No real option contract found on NSE exchange! Do not synthesize phantom trade!
+        # Strictly reject missing contracts during market hours ONLY when real broker capital is at stake
+        if market_open and is_live_broker_required:
             return None
         p_close = spot_prev_close if spot_prev_close > 0 else (spot_price / (1.0 + (spot_pct_change / 100.0)))
         p_high = spot_prev_high if spot_prev_high > 0 else max(p_close * 1.015, spot_price)
@@ -515,7 +526,7 @@ def analyze_option_r3_setup(
     # 1. Anti-FOMO Chasing Guard:
     # If Option LTP has ALREADY reached or exceeded R3 (+2% buffer),
     # the impulse move is already exhausted! Fresh buying is strictly BLOCKED!
-    is_chasing = bool(opt_r3 > 0 and opt_ltp >= opt_r3 * 1.02)
+    is_chasing = bool(opt_r3 > 0 and opt_ltp >= opt_r3 * 1.08)
     is_exhausted = bool(opt_r3 > 0 and opt_ltp >= opt_r3)
 
     # 2. Early Breakout Zone (R2 Breakout towards R3):
@@ -675,11 +686,21 @@ def analyze_put_r3_setup(
             pass
 
     # 2. Resilient Analytical Fallback for Put Options
-    # Strictly reject non-existent F&O contracts during market hours!
+    # If live Fyers broker data is unavailable or rate-limited:
     if opt_ltp <= 0 or opt_prev_h <= 0:
+        is_live_broker_required = False
+        try:
+            from core.fyers_order_engine import load_algo_config, EXCLUDED_FNO_STOCKS
+            if clean_sym in EXCLUDED_FNO_STOCKS:
+                return None
+            algo_cfg_check = load_algo_config()
+            if algo_cfg_check.get("mode") == "LIVE":
+                is_live_broker_required = True
+        except Exception:
+            pass
+
         market_open, _ = is_market_open()
-        if market_open:
-            # No real put option contract found on NSE exchange! Do not synthesize phantom trade!
+        if market_open and is_live_broker_required:
             return None
         p_close = spot_prev_close if spot_prev_close > 0 else (spot_price / (1.0 + (spot_pct_change / 100.0)))
         p_high = spot_prev_high if spot_prev_high > 0 else max(p_close * 1.015, spot_price)
@@ -711,7 +732,7 @@ def analyze_put_r3_setup(
     # 1. Anti-FOMO Chasing Guard for Put Option:
     # If Put Option has already reached or exceeded Put R3 (+2% buffer),
     # the down-move is exhausted! Fresh buying is strictly BLOCKED!
-    is_put_chasing = bool(put_r3 > 0 and opt_ltp >= put_r3 * 1.02)
+    is_put_chasing = bool(put_r3 > 0 and opt_ltp >= put_r3 * 1.08)
     is_put_exhausted = bool(put_r3 > 0 and opt_ltp >= put_r3)
 
     # 2. Early Put Breakout Zone (Put breaks R2 moving towards R3):

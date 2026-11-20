@@ -1139,20 +1139,34 @@ def run_scan_cycle(force=False, watchlist=None):
         adx_val_c = float(res.get('adx_3m', 0.0) or 0.0)
         plus_di_c = float(res.get('plus_di_3m', 0.0) or 0.0)
         minus_di_c = float(res.get('minus_di_3m', 0.0) or 0.0)
-        adx_call_ok = bool(adx_val_c == 0.0 or (20.0 <= adx_val_c <= 52.0 and plus_di_c >= minus_di_c))
 
-        # Check Nifty Market Regime Direction (Minervini 75% Rule)
+        # Check Nifty Market Regime Direction & Configured Algo Guards
         from core.config import get_nifty_market_regime
         from .fyers_order_engine import load_algo_config
         algo_cfg_sc = load_algo_config()
+
+        adx_filter_on = bool(algo_cfg_sc.get("adx_filter_enabled", True))
+        exhaustion_filter_on = bool(algo_cfg_sc.get("exhaustion_climax_guard", True))
+        nifty_regime_on = bool(algo_cfg_sc.get("nifty_regime_filter", True))
+
+        adx_call_ok = True
+        if adx_filter_on and adx_val_c > 0:
+            adx_call_ok = bool(18.0 <= adx_val_c <= 55.0 and plus_di_c >= minus_di_c)
+
+        adx_put_ok = True
+        if adx_filter_on and adx_val_c > 0:
+            adx_put_ok = bool(18.0 <= adx_val_c <= 55.0 and minus_di_c >= plus_di_c)
+
         nifty_regime = get_nifty_market_regime()
         nifty_pct_sc = float(nifty_regime.get("pct", 0.0) or 0.0)
-        nifty_regime_on = bool(algo_cfg_sc.get("nifty_regime_filter", True))
 
         # If Nifty is Bearish (pct <= -0.25), Call breakout confirmation is blocked
         nifty_call_ok = not (nifty_regime_on and nifty_pct_sc <= -0.25)
         # If Nifty is Bullish (pct >= +0.25), Put breakout confirmation is blocked
         nifty_put_ok = not (nifty_regime_on and nifty_pct_sc >= 0.25)
+
+        bull_exhausted_check = bool(exhaustion_filter_on and res.get('is_bull_exhausted', False))
+        bear_exhausted_check = bool(exhaustion_filter_on and res.get('is_bear_exhausted', False))
 
         is_r3_confirmed = bool(
             (spot_at_or_above_r1 or spot_at_or_above_r2 or is_sniper_buy or "STRONG BUY" in curr_sig) and
@@ -1160,7 +1174,7 @@ def run_scan_cycle(force=False, watchlist=None):
             res.get('is_r3_rsi_confirmed', True) and
             adx_call_ok and
             nifty_call_ok and
-            not res.get('is_bull_exhausted', False) and
+            not bull_exhausted_check and
             not res.get('is_wick_rejected', False) and
             not res.get('is_chasing', False)
         )
@@ -1189,15 +1203,13 @@ def run_scan_cycle(force=False, watchlist=None):
         spot_at_or_below_s1 = bool(spot_s1 > 0 and spot_p <= spot_s1)
         spot_at_or_below_s2 = bool(spot_s2 > 0 and spot_p <= spot_s2)
         r3_put_confirmed_key = f"{s_name}_PUT_R3_CONFIRMED_{today_str}"
-        adx_put_ok = bool(adx_val_c == 0.0 or (20.0 <= adx_val_c <= 52.0 and minus_di_c >= plus_di_c))
-
         is_put_r3_confirmed = bool(
             (spot_at_or_below_s1 or spot_at_or_below_s2 or is_sniper_short or "STRONG SELL" in curr_sig) and
             res.get('is_put_r3_crossed') and
             res.get('is_put_rsi_confirmed', True) and
             adx_put_ok and
             nifty_put_ok and
-            not res.get('is_bear_exhausted', False) and
+            not bear_exhausted_check and
             not res.get('is_lower_wick_rejected', False) and
             not res.get('is_put_chasing', False)
         )
