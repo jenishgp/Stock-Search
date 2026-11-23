@@ -1186,6 +1186,14 @@ def run_scan_cycle(force=False, watchlist=None):
                     new_alerts.append(f"🤖 ALGO EXEC: {s_name}")
                 else:
                     print(f"🤖 Auto-Algo Skipped/Standby: {algo_msg}")
+                    skip_info_msg = (
+                        f"ℹ️ <b>આલ્ગો સ્ટેન્ડબાય ({s_name})</b>\n"
+                        f"━━━━━━━━━━━━━━━━━━━━━\n"
+                        f"• <b>કારણ:</b> {algo_msg}\n"
+                        f"• <b>સિગ્નલ:</b> 100% કન્ફર્મ બાય એલર્ટ\n"
+                        f"• ⏰ {now_ist_scan.strftime('%H:%M:%S IST')} | 🤖 Patel Trading Bot"
+                    )
+                    send_telegram_alert(skip_info_msg)
             except Exception as algo_err:
                 print(f"Error executing algo entry: {algo_err}")
 
@@ -1223,6 +1231,14 @@ def run_scan_cycle(force=False, watchlist=None):
                     new_alerts.append(f"🤖 ALGO PUT EXEC: {s_name}")
                 else:
                     print(f"🤖 Auto-Algo Put Skipped: {algo_msg}")
+                    skip_info_put = (
+                        f"ℹ️ <b>આલ્ગો સ્ટેન્ડબાય ({s_name} PUT)</b>\n"
+                        f"━━━━━━━━━━━━━━━━━━━━━\n"
+                        f"• <b>કારણ:</b> {algo_msg}\n"
+                        f"• <b>સિગ્નલ:</b> 100% કન્ફર્મ પુટ બાય એલર્ટ\n"
+                        f"• ⏰ {now_ist_scan.strftime('%H:%M:%S IST')} | 🤖 Patel Trading Bot"
+                    )
+                    send_telegram_alert(skip_info_put)
             except Exception as algo_err:
                 print(f"Error executing algo put entry: {algo_err}")
 

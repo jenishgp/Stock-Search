@@ -122,7 +122,7 @@ DEFAULT_ALGO_CONFIG = {
     "max_risk_per_trade": 1500.0,       # Risk per trade (1.5% of 1L)
     "max_capital_per_trade": 25000.0,   # Max margin allocated per trade
     "daily_max_loss": 5000.0,           # Daily Kill-Switch limit
-    "max_open_positions": 4,            # Max active concurrent positions (Quality over Quantity)
+    "max_open_positions": 10,           # Max active concurrent positions (Quality over Quantity)
     "target_1_pct": 20.0,               # Target 1: Quick Scaler +20% (Books 50% Qty)
     "target_2_pct": 60.0,               # Target 2: Runner +60% (Books 30% Qty)
     "target_1_ratio": 1.5,              # 1:1.5 RR (First 50% exit)
@@ -133,7 +133,7 @@ DEFAULT_ALGO_CONFIG = {
     "breakeven_lock_enabled": True,     # Mark Minervini +15% Zero-Risk Breakeven Lock
     "breakeven_trigger_pct": 15.0,      # Lock SL to Cost once option reaches +15%
     "auto_square_off_time": "15:15",    # Intraday auto exit
-    "start_time": "09:45",              # Opening Guard: Skip 09:15 - 09:45 opening noise
+    "start_time": "09:15",              # Opening Guard: 09:15 AM IST (Captures opening breakouts)
     "end_time": "15:00",                # No new trades after 15:00
     "kill_switch_triggered": False,
     "last_reset_date": "",
@@ -772,10 +772,10 @@ def execute_algo_entry(scan_res: Dict[str, Any]) -> Tuple[bool, str]:
         plus_di = float(scan_res.get("plus_di_3m", 0.0) or 0.0)
         minus_di = float(scan_res.get("minus_di_3m", 0.0) or 0.0)
         if adx_val > 0:
-            if adx_val < 20.0:
-                return _skip(f"Skipped {sym}: ADX ({adx_val:.1f}) < 20 (Weak sideways/choppy trend trap)", "ADX_WEAK")
-            elif adx_val > 52.0:
-                return _skip(f"Skipped {sym}: ADX ({adx_val:.1f}) > 52 (Overextended climax exhaustion risk)", "ADX_EXHAUSTED")
+            if adx_val < 18.0:
+                return _skip(f"Skipped {sym}: ADX ({adx_val:.1f}) < 18 (Weak sideways/choppy trend trap)", "ADX_WEAK")
+            elif adx_val > 55.0:
+                return _skip(f"Skipped {sym}: ADX ({adx_val:.1f}) > 55 (Overextended climax exhaustion risk)", "ADX_EXHAUSTED")
             if opt_type == "CE" and plus_di < minus_di:
                 return _skip(f"Skipped {sym} Call: +DI ({plus_di:.1f}) < -DI ({minus_di:.1f}) (Sellers dominate)", "DI_BEARISH")
             elif opt_type == "PE" and minus_di < plus_di:
@@ -835,7 +835,8 @@ def execute_algo_entry(scan_res: Dict[str, Any]) -> Tuple[bool, str]:
             fyers_quote = safe_fyers_quotes(cl_f, {"symbols": fyers_sym})
             if isinstance(fyers_quote, dict):
                 if fyers_quote.get("code") == -300 or "invalid symbol" in str(fyers_quote.get("message", "")).lower():
-                    return _skip(f"Skipped {sym}: Contract {fyers_sym} does not exist on NSE", "NOT_FNO")
+                    if cfg.get("mode", "PAPER") == "LIVE":
+                        return _skip(f"Skipped {sym}: Contract {fyers_sym} does not exist on NSE", "NOT_FNO")
                 if "d" in fyers_quote and len(fyers_quote["d"]) > 0:
                     v_quote = fyers_quote["d"][0].get("v", {})
                     live_lp = float(v_quote.get("lp", 0.0) or 0.0)
