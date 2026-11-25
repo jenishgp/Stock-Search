@@ -1252,9 +1252,35 @@ def run_scan_cycle(force=False, watchlist=None):
         # to ensure the background auto-scanner focuses 100% on the Call & Put R2/R3 + Bollinger Squeeze setup
         # and completely protects Fyers API tokens.
 
-        # 1. Confirmed Sniper Buy - Suppressed to prevent Telegram alert spam
-        if is_sniper_buy and (prev_sig != curr_sig) and not state.get(r3_confirmed_key):
+        # 1. Confirmed Sniper Buy -> Send Sniper Alert (1x/day) & Execute Auto-Algo Entry
+        sniper_buy_key = f"{s_name}_SNIPER_BUY_{today_str}"
+        if is_sniper_buy and not state.get(r3_confirmed_key) and not state.get(sniper_buy_key):
+            state[sniper_buy_key] = True
             new_alerts.append(f"{s_name}: SNIPER BUY")
+            try:
+                sniper_alert_text = format_sniper_buy_alert(res)
+                send_telegram_alert(sniper_alert_text)
+            except Exception as tg_err:
+                print(f"Error sending sniper buy alert: {tg_err}")
+
+            try:
+                from .fyers_order_engine import execute_algo_entry
+                algo_ok, algo_msg = execute_algo_entry(res)
+                if algo_ok:
+                    print(f"🤖 Auto-Algo Sniper Buy Execution Success: {algo_msg}")
+                    new_alerts.append(f"🤖 ALGO SNIPER EXEC: {s_name}")
+                else:
+                    print(f"🤖 Auto-Algo Sniper Buy Skipped/Standby: {algo_msg}")
+                    skip_sniper_msg = (
+                        f"ℹ️ <b>આલ્ગો સ્ટેન્ડબાય ({s_name} - Sniper Buy)</b>\n"
+                        f"━━━━━━━━━━━━━━━━━━━━━\n"
+                        f"• <b>કારણ:</b> {algo_msg}\n"
+                        f"• <b>સિગ્નલ:</b> {curr_sig}\n"
+                        f"• ⏰ {now_ist_scan.strftime('%H:%M:%S IST')} | 🤖 Patel Trading Bot"
+                    )
+                    send_telegram_alert(skip_sniper_msg)
+            except Exception as algo_err:
+                print(f"Error executing sniper algo entry: {algo_err}")
 
         # NOTE: Unconfirmed "BUY ON DIPS (Wait for 1H)" and general weak bullish alerts
         # are intentionally suppressed from Telegram to prevent message spam.
