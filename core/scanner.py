@@ -1201,6 +1201,10 @@ def run_scan_cycle(force=False, watchlist=None):
                     send_telegram_alert(skip_info_msg)
             except Exception as algo_err:
                 print(f"Error executing algo entry: {algo_err}")
+                try:
+                    send_telegram_alert(f"⚠️ <b>Algo Error ({s_name}):</b> {algo_err}")
+                except Exception:
+                    pass
 
         # 0.05 Bearish Put Option Breakout / 100% Confirmed Put Buy Alert
         spot_s1 = res.get('s1', 0)
@@ -1246,6 +1250,10 @@ def run_scan_cycle(force=False, watchlist=None):
                     send_telegram_alert(skip_info_put)
             except Exception as algo_err:
                 print(f"Error executing algo put entry: {algo_err}")
+                try:
+                    send_telegram_alert(f"⚠️ <b>Algo Put Error ({s_name}):</b> {algo_err}")
+                except Exception:
+                    pass
 
         # 0.1 Standalone Option R3 Breakout - Suppressed to prevent Telegram alert spam
         r3_alert_key = f"{s_name}_R3_{today_str}"
@@ -1286,6 +1294,10 @@ def run_scan_cycle(force=False, watchlist=None):
                     send_telegram_alert(skip_sniper_msg)
             except Exception as algo_err:
                 print(f"Error executing sniper algo entry: {algo_err}")
+                try:
+                    send_telegram_alert(f"⚠️ <b>Algo Sniper Error ({s_name}):</b> {algo_err}")
+                except Exception:
+                    pass
 
         # NOTE: Unconfirmed "BUY ON DIPS (Wait for 1H)" and general weak bullish alerts
         # are intentionally suppressed from Telegram to prevent message spam.

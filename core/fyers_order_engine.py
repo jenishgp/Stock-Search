@@ -673,7 +673,8 @@ def execute_algo_entry(scan_res: Dict[str, Any]) -> Tuple[bool, str]:
     """
     sym = scan_res.get("symbol", "")
     opt_type = scan_res.get("opt_type", "CE")
-    entry_price = float(scan_res.get("opt_put_ltp", 0.0) if opt_type == "PE" else scan_res.get("opt_ltp", 0.0))
+    raw_ltp = scan_res.get("opt_put_ltp") if opt_type == "PE" else scan_res.get("opt_ltp")
+    entry_price = float(raw_ltp or 0.0)
 
     def _skip(reason_msg: str, status_tag: str = "STANDBY"):
         log_algo_event(sym or "SYSTEM", status_tag, reason_msg, status="STANDBY")
