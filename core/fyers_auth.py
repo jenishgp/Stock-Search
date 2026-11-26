@@ -361,6 +361,7 @@ _fyers_rate_lock = threading.Lock()
 _last_fyers_req_ts = 0.0
 _daily_history_cache = {}  # Daily candles don't change intra-day: (symbol, resolution, from, to) -> res
 _quotes_cache = {}          # Short-lived quotes cache (15s): symbols_str -> (timestamp, res)
+_optionchain_cache = {}     # Short-lived option chain cache (60s): symbol_str -> (timestamp, res)
 
 def safe_fyers_history(fyers_client, data: dict, retries: int = 2) -> dict:
     """
@@ -400,6 +401,50 @@ def safe_fyers_history(fyers_client, data: dict, retries: int = 2) -> dict:
                 # Cache successful daily history
                 if res.get("s") == "ok" and res_code in ["D", "1D"]:
                     _daily_history_cache[cache_key] = res
+            return res
+        except Exception as e:
+            if attempt < retries:
+                time.sleep(0.4 + attempt * 0.25)
+                continue
+            return {"s": "error", "message": str(e)}
+    return {"s": "error", "message": "Max retries exceeded"}
+
+
+def safe_fyers_optionchain(fyers_client, data: dict, retries: int = 1) -> dict:
+    """
+    Thread-safe optionchain caller with rate-limiting and 60s in-memory cache
+    to verify exact NSE F&O strikes and filter out non-F&O stocks.
+    """
+    global _last_fyers_req_ts, _optionchain_cache
+    sym = str(data.get("symbol", ""))
+    strikecount = str(data.get("strikecount", 5))
+    cache_key = f"{sym}_{strikecount}"
+    now_ts = time.time()
+
+    if cache_key in _optionchain_cache:
+        c_ts, c_val = _optionchain_cache[cache_key]
+        if (now_ts - c_ts) < 60.0:
+            return c_val
+
+    for attempt in range(retries + 1):
+        with _fyers_rate_lock:
+            now = time.time()
+            elapsed = now - _last_fyers_req_ts
+            if elapsed < 0.22:
+                time.sleep(0.22 - elapsed)
+            _last_fyers_req_ts = time.time()
+
+        try:
+            res = fyers_client.optionchain(data=data)
+            if isinstance(res, dict):
+                msg = str(res.get("message", "")).lower()
+                if res.get("code") == -360 or "5,000 requests/day" in msg or "standard plan limit" in msg:
+                    return res
+                if "requests/second" in msg or "limit" in msg or res.get("code") in [-99, 429]:
+                    time.sleep(0.4 + attempt * 0.25)
+                    continue
+                if res.get("s") == "ok" or res.get("code") == -300 or "invalid symbol" in msg:
+                    _optionchain_cache[cache_key] = (now_ts, res)
             return res
         except Exception as e:
             if attempt < retries:

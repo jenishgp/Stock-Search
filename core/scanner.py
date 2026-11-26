@@ -313,6 +313,7 @@ def analyze_stock(sym):
         
         # Build exact Option Contract details (e.g. 'DLF 26 NOV 700 CE')
         opt_info = build_option_contract(sym, curr_p, "CE")
+        is_fno_eligible = bool(opt_info.get("is_fno_valid", True))
         opt_contract_name = opt_info["contract_name"]
         opt_fyers_symbol = opt_info["fyers_symbol"]
         otm_call_strike = opt_info["strike"]
@@ -534,6 +535,9 @@ def analyze_stock(sym):
                 if opt_analysis:
                     opt_ltp = opt_analysis.get("opt_ltp", 0.0)
                     opt_r3_val = opt_analysis.get("opt_r3", 0.0)
+                    opt_contract_name = opt_analysis.get("contract_name") or opt_contract_name
+                    opt_fyers_symbol = opt_analysis.get("fyers_symbol") or opt_fyers_symbol
+                    otm_call_strike = opt_analysis.get("strike") or otm_call_strike
                     is_option_r3_crossed = opt_analysis.get("is_option_r3_crossed", False)
                     if is_option_r3_crossed:
                         is_r3_radar = True
@@ -666,6 +670,7 @@ def analyze_stock(sym):
             "opt_put_t2": opt_put_analysis.get("t2", 0.0) if opt_put_analysis else 0.0,
             "opt_contract_name": opt_contract_name,
             "opt_fyers_symbol": opt_fyers_symbol,
+            "is_fno_eligible": is_fno_eligible,
             "opt_ltp": opt_ltp,
             "opt_sl": round(opt_ltp * 0.75, 2) if opt_ltp > 0 else 0.0,
             "opt_t1": round(opt_ltp * 1.35, 2) if opt_ltp > 0 else 0.0,
@@ -1057,7 +1062,7 @@ def run_scan_cycle(force=False, watchlist=None):
         s_name = res['symbol']
         clean_s_name = s_name.replace(".NS", "").replace(".BO", "").replace("^", "").strip().upper()
         from .fyers_order_engine import EXCLUDED_FNO_STOCKS
-        if clean_s_name in EXCLUDED_FNO_STOCKS:
+        if clean_s_name in EXCLUDED_FNO_STOCKS or not res.get("is_fno_eligible", True):
             continue
         curr_sig = res['signal']
         prev_sig = state.get(s_name)

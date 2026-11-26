@@ -23,7 +23,7 @@
   "start_time": "09:15",
   "end_time": "15:00",
   "kill_switch_triggered": false,
-  "last_reset_date": "2026-11-23",
+  "last_reset_date": "2026-11-26",
   "time_stop_enabled": true,
   "time_stop_minutes": 45,
   "vwap_filter_enabled": true,

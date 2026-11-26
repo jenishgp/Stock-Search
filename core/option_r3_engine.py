@@ -288,23 +288,34 @@ def build_option_contract(symbol: str, spot_price: float, opt_type: str = "CE") 
     """
     Builds the exact Strike, Contract Name, and Fyers Trading Symbol for an OTM Option.
     Supports Weekly Expiry for Indices and Monthly Expiry for F&O Equities.
-    Example: symbol='^NSEI', spot=24520 -> 'NIFTY 5 NOV (W) 24550 CE' & 'NSE:NIFTY26N0524550CE'
+    Uses live Fyers Option Chain when available to guarantee exact exchange-listed strikes & F&O eligibility.
     """
     clean_sym, exchange, display_name = normalize_symbol_and_exchange(symbol)
+    opt_t = opt_type.upper()
+    is_idx = is_index_symbol(symbol)
+
+    is_fno_valid = True
+    try:
+        from core.fyers_order_engine import EXCLUDED_FNO_STOCKS
+        if not is_idx and clean_sym in EXCLUDED_FNO_STOCKS:
+            is_fno_valid = False
+    except Exception:
+        pass
+
     step = get_accurate_strike_step(clean_sym, spot_price)
-    
-    # Calculate Nearest ATM or First Just Out-Of-The-Money (OTM) Strike (Never far OTM)
-    atm_strike = int(round(spot_price / step) * step)
-    if opt_type.upper() == "CE":
-        strike = atm_strike if atm_strike >= spot_price else atm_strike + int(step)
+
+    # Calculate Nearest ATM or First Just Out-Of-The-Money (OTM) Strike (Supports fractional steps like 2.5)
+    atm_raw = round(spot_price / step) * step
+    if opt_t == "CE":
+        strike_val = atm_raw if atm_raw >= spot_price else atm_raw + step
     else:
-        strike = atm_strike if atm_strike <= spot_price else atm_strike - int(step)
+        strike_val = atm_raw if atm_raw <= spot_price else atm_raw - step
+
+    strike_val = round(strike_val, 2)
+    strike = int(strike_val) if strike_val == int(strike_val) else strike_val
 
     # Use Weekly Expiry for Indices, Monthly Expiry for Stocks
-    is_idx = is_index_symbol(symbol)
     if is_idx:
-        # BSE SENSEX & BANKEX use Monthly expiry symbols in Fyers API (e.g. BSE:SENSEX26NOV80200CE)
-        # SEBI discontinued weekly expiries for BANKNIFTY & FINNIFTY -> Monthly Expiry; BSE SENSEX & BANKEX also use Monthly expiry symbols
         if clean_sym in ["SENSEX", "BSESN", "BANKEX", "BANKNIFTY", "NIFTYBANK", "FINNIFTY", "NIFTY_FIN_SERVICE"] or exchange == "BSE":
             expiry_info = get_current_monthly_expiry()
         else:
@@ -312,8 +323,65 @@ def build_option_contract(symbol: str, spot_price: float, opt_type: str = "CE") 
     else:
         expiry_info = get_current_monthly_expiry()
 
-    contract_name = f"{clean_sym} {expiry_info['label']} {strike} {opt_type.upper()}"
-    fyers_symbol = f"{exchange}:{clean_sym}{expiry_info['fyers_code']}{strike}{opt_type.upper()}"
+    contract_name = f"{clean_sym} {expiry_info['label']} {strike} {opt_t}"
+    fyers_symbol = f"{exchange}:{clean_sym}{expiry_info['fyers_code']}{strike}{opt_t}"
+    live_opt_ltp = 0.0
+    live_opt_prev_c = 0.0
+
+    # Live Fyers Option Chain Verification: Guarantees exact exchange strike & F&O eligibility
+    if is_fno_valid:
+        try:
+            from core.fyers_auth import _cached_fyers_client, get_cached_token, get_fyers_client, safe_fyers_optionchain
+            cl_f = _cached_fyers_client
+            if cl_f is None and get_cached_token() is not None:
+                ok_f, cl_tmp = get_fyers_client(force_refresh=False)
+                if ok_f:
+                    cl_f = cl_tmp
+            if cl_f is not None:
+                if is_idx:
+                    idx_map = {
+                        "NIFTY": "NSE:NIFTY50-INDEX",
+                        "BANKNIFTY": "NSE:NIFTYBANK-INDEX",
+                        "FINNIFTY": "NSE:FINNIFTY-INDEX",
+                        "SENSEX": "BSE:SENSEX-INDEX",
+                    }
+                    u_sym = idx_map.get(clean_sym, f"{exchange}:{clean_sym}-INDEX")
+                else:
+                    u_sym = f"{exchange}:{clean_sym}-EQ"
+
+                oc_res = safe_fyers_optionchain(cl_f, {"symbol": u_sym, "strikecount": 5})
+                if isinstance(oc_res, dict):
+                    msg_oc = str(oc_res.get("message", "")).lower()
+                    if oc_res.get("code") == -300 or "invalid symbol" in msg_oc:
+                        is_fno_valid = False
+                    elif oc_res.get("s") == "ok":
+                        chain_items = oc_res.get("data", {}).get("optionsChain", []) or []
+                        matching = [
+                            item for item in chain_items
+                            if str(item.get("option_type", "")).upper() == opt_t
+                            and float(item.get("strike_price", 0) or 0) > 0
+                            and str(item.get("symbol", ""))
+                        ]
+                        if not matching and not is_idx:
+                            # No active options chain for this equity -> exited F&O
+                            is_fno_valid = False
+                        elif matching:
+                            # Pick nearest ATM/First OTM from actual exchange-listed strikes
+                            if opt_t == "CE":
+                                otm_list = [m for m in matching if float(m["strike_price"]) >= spot_price]
+                                best = min(otm_list, key=lambda m: float(m["strike_price"])) if otm_list else max(matching, key=lambda m: float(m["strike_price"]))
+                            else:
+                                otm_list = [m for m in matching if float(m["strike_price"]) <= spot_price]
+                                best = max(otm_list, key=lambda m: float(m["strike_price"])) if otm_list else min(matching, key=lambda m: float(m["strike_price"]))
+
+                            b_strike = float(best["strike_price"])
+                            strike = int(b_strike) if b_strike == int(b_strike) else round(b_strike, 2)
+                            fyers_symbol = str(best["symbol"])
+                            live_opt_ltp = float(best.get("ltp", 0.0) or 0.0)
+                            live_opt_prev_c = float(best.get("prev_close_price", 0.0) or 0.0)
+                            contract_name = f"{clean_sym} {expiry_info['label']} {strike} {opt_t}"
+        except Exception:
+            pass
 
     return {
         "symbol": clean_sym,
@@ -322,12 +390,15 @@ def build_option_contract(symbol: str, spot_price: float, opt_type: str = "CE") 
         "spot_price": spot_price,
         "strike": strike,
         "step": step,
-        "opt_type": opt_type.upper(),
+        "opt_type": opt_t,
         "is_index": is_idx,
+        "is_fno_valid": is_fno_valid,
         "is_gamma_blast": expiry_info.get("is_gamma_blast", False),
         "expiry_info": expiry_info,
         "contract_name": contract_name,
-        "fyers_symbol": fyers_symbol
+        "fyers_symbol": fyers_symbol,
+        "live_opt_ltp": live_opt_ltp,
+        "live_opt_prev_c": live_opt_prev_c
     }
 
 def calculate_option_pivot_levels(prev_high: float, prev_low: float, prev_close: float) -> Dict[str, float]:
@@ -378,6 +449,8 @@ def analyze_option_r3_setup(
     4. Computes Targets & Trailing Stop Loss
     """
     contract = build_option_contract(symbol, spot_price, opt_type="CE")
+    if not contract.get("is_fno_valid", True):
+        return None
     clean_sym = contract["symbol"]
     strike = contract["strike"]
     fyers_sym = contract["fyers_symbol"]
@@ -625,6 +698,8 @@ def analyze_put_r3_setup(
     5. Computes Put Targets & Trailing Stop Loss
     """
     contract = build_option_contract(symbol, spot_price, opt_type="PE")
+    if not contract.get("is_fno_valid", True):
+        return None
     clean_sym = contract["symbol"]
     strike = contract["strike"]
     fyers_sym = contract["fyers_symbol"]

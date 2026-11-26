@@ -27,7 +27,9 @@ EXCLUDED_FNO_STOCKS = {
     "INDIAMART", "METROPOLIS", "NATIONALUM", "SYNGENE",
     "ATUL", "BATAINDIA", "GRANULES", "GUJGASLTD", "IPCALAB",
     "LALPATHLAB", "LICHSGFIN", "BAJAJHLDNG", "NUVAMA", "CYIENT", "HFCL",
-    "NCC", "TITAGARH", "ABFRL", "ATGL", "CESC", "IRB", "JSL", "POONAWALLA", "SJVN"
+    "NCC", "TITAGARH", "ABFRL", "ATGL", "CESC", "IRB", "JSL", "POONAWALLA", "SJVN",
+    "ABBOTINDIA", "BERGEPAINT", "DEEPAKNTR", "NAVINFLUOR", "PVRINOX", "JKCEMENT",
+    "SUNTV", "COROMANDEL", "INDIGOPNTS", "BALRAMCHIN", "GNFC", "RBLBANK"
 }
 
 # Standard NSE F&O Lot Sizes (Indexed by clean symbol)
@@ -678,10 +680,12 @@ def execute_algo_entry(scan_res: Dict[str, Any]) -> Tuple[bool, str]:
         return False, reason_msg
 
     cfg = load_algo_config()
+    trade_mode = cfg.get("mode", "PAPER")
+    is_live_mode = (trade_mode == "LIVE")
 
     # Safety Check 0: NSE F&O Excluded Stocks Check (Triple Lock)
     clean_sym_check = sym.upper().replace(".NS", "").replace("NSE:", "").strip()
-    if clean_sym_check in EXCLUDED_FNO_STOCKS:
+    if clean_sym_check in EXCLUDED_FNO_STOCKS or scan_res.get("is_fno_eligible") is False:
         return _skip(f"Skipped {sym}: Excluded from NSE F&O derivative trading", "NON_FNO")
     
     # Safety Check 1: Is Algo Enabled?
@@ -692,19 +696,20 @@ def execute_algo_entry(scan_res: Dict[str, Any]) -> Tuple[bool, str]:
     if cfg.get("kill_switch_triggered", False):
         return _skip("Daily Kill-Switch is ACTIVE (Max Loss Hit)", "KILL_SWITCH")
         
-    # Safety Check 3: Time Window Check (09:45 to 15:00 IST Opening Guard)
+    # Safety Check 3: Time Window Check (Strict in LIVE mode; PAPER mode follows any Telegram Confirmed Buy during market hours)
     now_ist = get_ist_now()
     curr_time_str = now_ist.strftime("%H:%M")
-    start_time_limit = cfg.get("start_time", "09:45")
+    start_time_limit = cfg.get("start_time", "09:15")
     end_time_limit = cfg.get("end_time", "15:00")
-    if curr_time_str < start_time_limit:
-        return _skip(f"Opening Guard Active ({curr_time_str} IST < {start_time_limit} IST Opening Buffer)", "TIME_WINDOW")
-    if curr_time_str > end_time_limit:
-        return _skip(f"Outside Algo Entry Time Window ({curr_time_str} IST > {end_time_limit} IST)", "TIME_WINDOW")
+    if is_live_mode:
+        if curr_time_str < start_time_limit:
+            return _skip(f"Opening Guard Active ({curr_time_str} IST < {start_time_limit} IST Opening Buffer)", "TIME_WINDOW")
+        if curr_time_str > end_time_limit:
+            return _skip(f"Outside Algo Entry Time Window ({curr_time_str} IST > {end_time_limit} IST)", "TIME_WINDOW")
         
     # Safety Check 4: Market Hours
     market_open, _ = is_market_open()
-    if not market_open:
+    if not market_open and not scan_res.get("is_synthetic_test", False):
         return _skip("Market is Closed", "MARKET_CLOSED")
         
     trades_data = load_algo_trades()
@@ -715,8 +720,8 @@ def execute_algo_entry(scan_res: Dict[str, Any]) -> Tuple[bool, str]:
     if len(active_trades) >= max_open:
         return _skip(f"Max concurrent positions reached ({len(active_trades)}/{max_open})", "MAX_POSITIONS")
 
-    # Safety Check 5.0: Nifty Market Regime Directional Guard (Mark Minervini 75% General Market Rule)
-    if cfg.get("nifty_regime_filter", True):
+    # Safety Check 5.0: Nifty Market Regime Directional Guard (LIVE mode only — PAPER mirrors Telegram Confirmed Buy)
+    if is_live_mode and cfg.get("nifty_regime_filter", True):
         from core.config import get_nifty_market_regime
         nifty_regime = get_nifty_market_regime()
         nifty_pct = float(nifty_regime.get("pct", 0.0) or 0.0)
@@ -735,8 +740,8 @@ def execute_algo_entry(scan_res: Dict[str, Any]) -> Tuple[bool, str]:
                 "NIFTY_REGIME_GUARD"
             )
 
-    # Safety Check 5.05: Climax Exhaustion Guard (Anti-FOMO Top Buying / Bottom Shorting)
-    if cfg.get("exhaustion_climax_guard", True):
+    # Safety Check 5.05: Climax Exhaustion Guard (LIVE mode only)
+    if is_live_mode and cfg.get("exhaustion_climax_guard", True):
         if opt_type == "CE" and scan_res.get("is_bull_exhausted", False):
             return _skip(
                 f"Skipped {sym} Call: Underlying is in Bullish Exhaustion (RSI > 78 or ADX > 52 hooking down or Day Gain >= 4%). Buying climax top is blocked!",
@@ -766,8 +771,8 @@ def execute_algo_entry(scan_res: Dict[str, Any]) -> Tuple[bool, str]:
         elif opt_type == "PE" and scan_res.get("is_lower_wick_rejected", False):
             return _skip(f"Skipped {sym} Put: Lower rejection wick detected at support", "WICK_REJECTION")
 
-    # Safety Check 5.15: ADX Trend Strength Golden Zone Guard (Wilder & Linda Raschke Rule)
-    if cfg.get("adx_filter_enabled", True):
+    # Safety Check 5.15: ADX Trend Strength Golden Zone Guard (LIVE mode only)
+    if is_live_mode and cfg.get("adx_filter_enabled", True):
         adx_val = float(scan_res.get("adx_3m", 0.0) or 0.0)
         plus_di = float(scan_res.get("plus_di_3m", 0.0) or 0.0)
         minus_di = float(scan_res.get("minus_di_3m", 0.0) or 0.0)
@@ -788,12 +793,12 @@ def execute_algo_entry(scan_res: Dict[str, Any]) -> Tuple[bool, str]:
     elif trading_dir == "PUT_ONLY" and opt_type == "CE":
         return _skip(f"Skipped {sym}: Algo is restricted to PUT ONLY in settings", "DIR_FILTER")
 
-    # Safety Check 5.3: Anti-FOMO Chasing Guard (Never chase >8% above R3)
-    if scan_res.get("is_chasing", False) or (opt_type == "PE" and scan_res.get("is_put_chasing", False)):
+    # Safety Check 5.3: Anti-FOMO Chasing Guard (LIVE mode only)
+    if is_live_mode and (scan_res.get("is_chasing", False) or (opt_type == "PE" and scan_res.get("is_put_chasing", False))):
         return _skip(f"Skipped {sym}: Price is overextended (>8% above Option R3 level)", "CHASE_GUARD")
 
-    # Safety Check 5.4: Late Session (14:15 - 15:00 IST) Volume Guard
-    if curr_time_str > "14:15" and not scan_res.get("is_gamma_blast", False):
+    # Safety Check 5.4: Late Session (14:15 - 15:00 IST) Volume Guard (LIVE mode only)
+    if is_live_mode and curr_time_str > "14:15" and not scan_res.get("is_gamma_blast", False):
         v_rat = float(scan_res.get("vol_5m", scan_res.get("vol_ratio", 1.0)))
         if v_rat < 1.5:
             return _skip(f"Skipped {sym}: Post-14:15 non-gamma trade requires >= 1.5x volume (current: {v_rat:.1f}x)", "VOL_GUARD")
@@ -821,13 +826,10 @@ def execute_algo_entry(scan_res: Dict[str, Any]) -> Tuple[bool, str]:
         target_2 = float(scan_res.get('opt_t2') or scan_res.get('t2') or (entry_price * t2_factor))
 
     # Safety Guard: Reject any contract that does not exist or was excluded from NSE F&O
-    if not fyers_sym or any(fyers_sym.startswith(p) for p in [
-        'NSE:BSOFT', 'NSE:EXIDEIND', 'NSE:AARTIIND', 'NSE:HINDCOPPER', 'NSE:MGL', 
-        'NSE:PEL', 'NSE:CHAMBLFERT', 'NSE:CUB', 'NSE:ZEEL', 'NSE:ESCORTS', 'NSE:BALKRISIND'
-    ]):
+    if not fyers_sym or any(fyers_sym.startswith(f"NSE:{exc}") for exc in EXCLUDED_FNO_STOCKS):
         return _skip(f"Skipped {sym}: Excluded from NSE F&O derivatives segment", "NOT_FNO")
 
-    # Double-Lock Verification: Live quote verification with Fyers broker
+    # Double-Lock Verification: Live quote & strike verification with Fyers broker
     try:
         from core.fyers_auth import get_fyers_client, safe_fyers_quotes
         ok_f, cl_f = get_fyers_client()
@@ -835,9 +837,21 @@ def execute_algo_entry(scan_res: Dict[str, Any]) -> Tuple[bool, str]:
             fyers_quote = safe_fyers_quotes(cl_f, {"symbols": fyers_sym})
             if isinstance(fyers_quote, dict):
                 if fyers_quote.get("code") == -300 or "invalid symbol" in str(fyers_quote.get("message", "")).lower():
-                    if cfg.get("mode", "PAPER") == "LIVE":
+                    # Re-verify strike & F&O eligibility via live Fyers Option Chain
+                    spot_ref_chk = float(scan_res.get("spot_price") or scan_res.get("price") or 0.0)
+                    if spot_ref_chk > 0:
+                        from core.option_r3_engine import build_option_contract
+                        oc_fix = build_option_contract(sym, spot_ref_chk, opt_type)
+                        if not oc_fix.get("is_fno_valid", True):
+                            return _skip(f"Skipped {sym}: Removed from NSE F&O or no active option chain", "NOT_FNO")
+                        fyers_sym = oc_fix.get("fyers_symbol") or fyers_sym
+                        contract_name = oc_fix.get("contract_name") or contract_name
+                        if float(oc_fix.get("live_opt_ltp", 0.0) or 0.0) > 0:
+                            entry_price = round(float(oc_fix["live_opt_ltp"]), 2)
+                        fyers_quote = safe_fyers_quotes(cl_f, {"symbols": fyers_sym})
+                    elif is_live_mode:
                         return _skip(f"Skipped {sym}: Contract {fyers_sym} does not exist on NSE", "NOT_FNO")
-                if "d" in fyers_quote and len(fyers_quote["d"]) > 0:
+                if isinstance(fyers_quote, dict) and "d" in fyers_quote and len(fyers_quote["d"]) > 0:
                     v_quote = fyers_quote["d"][0].get("v", {})
                     live_lp = float(v_quote.get("lp", 0.0) or 0.0)
                     if live_lp > 0:
